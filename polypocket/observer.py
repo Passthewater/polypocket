@@ -93,6 +93,34 @@ class Observer:
         log.info("Saved %d observations to %s", len(self.records), self.output_path)
 
 
+def build_observation_record(
+    *,
+    timestamp: float,
+    window_slug: str,
+    btc_price: float,
+    price_to_beat: float,
+    t_remaining: float,
+    sigma_5min: float,
+    market_p_up: float | None,
+) -> ObservationRecord:
+    """Build an observation record anchored to Polymarket's official open."""
+    displacement = (btc_price - price_to_beat) / price_to_beat
+    model_p_up = compute_model_p_up(displacement, t_remaining, sigma_5min)
+    edge = model_p_up - market_p_up if market_p_up is not None else None
+    return ObservationRecord(
+        timestamp=timestamp,
+        window_slug=window_slug,
+        btc_price=btc_price,
+        window_open_price=price_to_beat,
+        displacement=displacement,
+        t_remaining=t_remaining,
+        sigma_5min=sigma_5min,
+        model_p_up=model_p_up,
+        market_p_up=market_p_up,
+        edge=edge,
+    )
+
+
 async def run_observer(duration_minutes: int = 60) -> None:
     """Run observation mode for a fixed duration."""
     from polypocket.config import VOLATILITY_LOOKBACK
@@ -104,11 +132,10 @@ async def run_observer(duration_minutes: int = 60) -> None:
     stop = asyncio.Event()
 
     current_window = None
-    window_open_price = None
 
     async def on_book_update(window, side):
         del side
-        nonlocal current_window, window_open_price
+        nonlocal current_window
 
         if binance.latest_price is None:
             return
@@ -120,13 +147,13 @@ async def run_observer(duration_minutes: int = 60) -> None:
 
         if current_window is None or current_window.condition_id != window.condition_id:
             current_window = window
-            window_open_price = binance.latest_price
-            log.info("New window: %s, open price: %.2f", window.slug, window_open_price)
+            log.info(
+                "New window: %s, priceToBeat: %.6f (Binance: %.2f)",
+                window.slug,
+                window.price_to_beat,
+                binance.latest_price,
+            )
 
-        if window_open_price is None:
-            return
-
-        displacement = (binance.latest_price - window_open_price) / window_open_price
         sigma = compute_realized_vol(
             binance.get_5min_returns(),
             VOLATILITY_LOOKBACK,
@@ -134,22 +161,15 @@ async def run_observer(duration_minutes: int = 60) -> None:
         if sigma <= 0:
             sigma = 0.001
 
-        model_p_up = compute_model_p_up(displacement, t_remaining, sigma)
-        market_p_up = window.up_ask
-        edge = model_p_up - market_p_up if market_p_up is not None else None
-
         observer.log_observation(
-            ObservationRecord(
+            build_observation_record(
                 timestamp=now,
                 window_slug=window.slug,
                 btc_price=binance.latest_price,
-                window_open_price=window_open_price,
-                displacement=displacement,
+                price_to_beat=window.price_to_beat,
                 t_remaining=t_remaining,
                 sigma_5min=sigma,
-                model_p_up=model_p_up,
-                market_p_up=market_p_up,
-                edge=edge,
+                market_p_up=window.up_ask,
             )
         )
 

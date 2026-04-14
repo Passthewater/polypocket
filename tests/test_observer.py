@@ -1,6 +1,10 @@
 from math import isclose
 
-from polypocket.observer import ObservationRecord, compute_model_p_up
+from polypocket.observer import (
+    ObservationRecord,
+    build_observation_record,
+    compute_model_p_up,
+)
 
 
 def test_compute_model_p_up_btc_above_open():
@@ -67,3 +71,17 @@ def test_observation_record():
         edge=0.045,
     )
     assert record.edge == 0.045
+
+
+def test_build_observation_record_uses_price_to_beat():
+    record = build_observation_record(
+        timestamp=1713100000.0,
+        window_slug="btc-updown-5m-123",
+        btc_price=84231.42,
+        price_to_beat=84198.00,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        market_p_up=0.575,
+    )
+    assert record.window_open_price == 84198.00
+    assert isclose(record.displacement, (84231.42 - 84198.00) / 84198.00)

@@ -2,7 +2,7 @@ from polypocket.feeds.polymarket import Window, parse_5min_btc_markets, parse_bo
 
 
 def test_parse_5min_btc_markets():
-    """Should extract active 5-min BTC up/down markets from Gamma API response."""
+    """Should extract active 5-min BTC up/down markets with priceToBeat."""
     markets = [
         {
             "condition_id": "abc123",
@@ -14,6 +14,7 @@ def test_parse_5min_btc_markets():
             ],
             "end_date_iso": "2026-04-14T20:05:00Z",
             "closed": False,
+            "eventMetadata": {"priceToBeat": 84198.123456},
         },
         {
             "condition_id": "def456",
@@ -29,6 +30,7 @@ def test_parse_5min_btc_markets():
     assert windows[0].condition_id == "abc123"
     assert windows[0].up_token_id == "tok_yes"
     assert windows[0].down_token_id == "tok_no"
+    assert windows[0].price_to_beat == 84198.123456
 
 
 def test_parse_book_event():
@@ -59,5 +61,7 @@ def test_window_dataclass():
         down_token_id="tok_down",
         end_time=1713100000.0,
         slug="btc-updown-5m-1776196800",
+        price_to_beat=84198.123456,
     )
     assert window.start_time == 1713099700.0
+    assert window.price_to_beat == 84198.123456

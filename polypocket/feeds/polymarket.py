@@ -30,6 +30,7 @@ class Window:
     down_token_id: str
     end_time: float
     slug: str
+    price_to_beat: float
     up_ask: float | None = None
     up_ask_size: float | None = None
     down_ask: float | None = None
@@ -58,6 +59,18 @@ def parse_5min_btc_markets(markets: list[dict]) -> list[Window]:
         if market.get("closed"):
             continue
 
+        event_meta = market.get("eventMetadata", {})
+        if isinstance(event_meta, str):
+            try:
+                event_meta = json.loads(event_meta)
+            except (TypeError, ValueError):
+                event_meta = {}
+        price_to_beat = event_meta.get("priceToBeat")
+        if price_to_beat is None:
+            log.warning("Skipping %s: no priceToBeat in eventMetadata", slug)
+            continue
+        price_to_beat = float(price_to_beat)
+
         up_token_id = None
         down_token_id = None
         for token in market.get("tokens", []):
@@ -84,6 +97,7 @@ def parse_5min_btc_markets(markets: list[dict]) -> list[Window]:
                 down_token_id=down_token_id,
                 end_time=end_time,
                 slug=slug,
+                price_to_beat=price_to_beat,
             )
         )
     return windows
@@ -108,12 +122,21 @@ async def fetch_active_windows() -> list[Window]:
     """Fetch currently active 5-minute BTC windows from Gamma."""
     params = {"closed": "false", "limit": 100, "tag": "btc"}
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{GAMMA_API}/markets", params=params) as response:
+        async with session.get(f"{GAMMA_API}/events", params=params) as response:
             if response.status != 200:
                 log.error("Gamma API returned %d", response.status)
                 return []
-            data = await response.json()
-    return parse_5min_btc_markets(data)
+            events = await response.json()
+
+    all_markets: list[dict] = []
+    for event in events:
+        event_meta = event.get("eventMetadata", {})
+        for market in event.get("markets", [event]):
+            market_copy = dict(market)
+            market_copy["eventMetadata"] = event_meta
+            all_markets.append(market_copy)
+
+    return parse_5min_btc_markets(all_markets)
 
 
 async def subscribe_and_stream(
