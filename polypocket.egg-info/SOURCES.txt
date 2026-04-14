@@ -1,0 +1,9 @@
+pyproject.toml
+polypocket/__init__.py
+polypocket/config.py
+polypocket.egg-info/PKG-INFO
+polypocket.egg-info/SOURCES.txt
+polypocket.egg-info/dependency_links.txt
+polypocket.egg-info/requires.txt
+polypocket.egg-info/top_level.txt
+tests/test_config.py
