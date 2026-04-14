@@ -1,7 +1,9 @@
 """Observation mode for comparing model and market probabilities."""
 
+import asyncio
 import csv
 import logging
+import time
 from dataclasses import asdict, dataclass
 from math import sqrt
 
@@ -89,3 +91,89 @@ class Observer:
             for record in self.records:
                 writer.writerow(asdict(record))
         log.info("Saved %d observations to %s", len(self.records), self.output_path)
+
+
+async def run_observer(duration_minutes: int = 60) -> None:
+    """Run observation mode for a fixed duration."""
+    from polypocket.config import VOLATILITY_LOOKBACK
+    from polypocket.feeds.binance import BinanceFeed
+    from polypocket.feeds.polymarket import fetch_active_windows, subscribe_and_stream
+
+    observer = Observer()
+    binance = BinanceFeed()
+    stop = asyncio.Event()
+
+    current_window = None
+    window_open_price = None
+
+    async def on_book_update(window, side):
+        del side
+        nonlocal current_window, window_open_price
+
+        if binance.latest_price is None:
+            return
+
+        now = time.time()
+        t_remaining = window.end_time - now
+        if t_remaining < 0:
+            return
+
+        if current_window is None or current_window.condition_id != window.condition_id:
+            current_window = window
+            window_open_price = binance.latest_price
+            log.info("New window: %s, open price: %.2f", window.slug, window_open_price)
+
+        if window_open_price is None:
+            return
+
+        displacement = (binance.latest_price - window_open_price) / window_open_price
+        sigma = compute_realized_vol(
+            binance.get_5min_returns(),
+            VOLATILITY_LOOKBACK,
+        )
+        if sigma <= 0:
+            sigma = 0.001
+
+        model_p_up = compute_model_p_up(displacement, t_remaining, sigma)
+        market_p_up = window.up_ask
+        edge = model_p_up - market_p_up if market_p_up is not None else None
+
+        observer.log_observation(
+            ObservationRecord(
+                timestamp=now,
+                window_slug=window.slug,
+                btc_price=binance.latest_price,
+                window_open_price=window_open_price,
+                displacement=displacement,
+                t_remaining=t_remaining,
+                sigma_5min=sigma,
+                model_p_up=model_p_up,
+                market_p_up=market_p_up,
+                edge=edge,
+            )
+        )
+
+    async def poll_windows():
+        while not stop.is_set():
+            windows = await fetch_active_windows()
+            log.info("Found %d active windows", len(windows))
+            if windows:
+                await subscribe_and_stream(windows, on_book_update, stop)
+            await asyncio.sleep(30)
+
+    log.info("Starting observation mode for %d minutes", duration_minutes)
+
+    tasks = [
+        asyncio.create_task(binance.run(stop)),
+        asyncio.create_task(poll_windows()),
+    ]
+
+    try:
+        await asyncio.sleep(duration_minutes * 60)
+    finally:
+        stop.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        observer.save_csv()
+        log.info("Observation complete. %d records saved.", len(observer.records))
