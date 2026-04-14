@@ -4,7 +4,9 @@
 
 **Goal:** Build a directional prediction bot that detects latency between real-time BTC price movements and Polymarket's 5-minute Up/Down market odds, and bets on the underpriced side.
 
-**Architecture:** Three async data feeds (Binance price via ccxt pro, Polymarket market discovery via Gamma REST, Polymarket order book via CLOB WS) converge into a signal engine that computes P(Up) using a Brownian motion model, compares to market odds, and triggers paper/live trades when edge exceeds threshold. Textual TUI for monitoring.
+**Architecture:** Three async data feeds (Binance price via ccxt pro, Polymarket event API + order book via CLOB WS) converge into a signal engine that computes P(Up) using a Brownian motion model, compares to market odds, and triggers paper/live trades when edge exceeds threshold. Textual TUI for monitoring.
+
+**Critical design constraint — priceToBeat:** Polymarket 5-min BTC markets resolve against the Chainlink BTC/USD data stream, NOT Binance. Each event exposes `eventMetadata.priceToBeat` — the official opening reference price the contract resolves against. ALL displacement calculations MUST use this value as the baseline, not a Binance-derived open. Binance is the fast *current* price feed; `priceToBeat` is the *reference* open. Using a different baseline would model the wrong target.
 
 **Tech Stack:** Python 3.11+, ccxt (pro WebSocket), py-clob-client, websockets, textual, scipy, numpy, aiohttp, SQLite
 
@@ -328,7 +330,7 @@ from polypocket.feeds.polymarket import (
 
 
 def test_parse_5min_btc_markets():
-    """Should extract active 5-min BTC up/down markets from Gamma API response."""
+    """Should extract active 5-min BTC up/down markets with priceToBeat."""
     markets = [
         {
             "condition_id": "abc123",
@@ -340,6 +342,7 @@ def test_parse_5min_btc_markets():
             ],
             "end_date_iso": "2026-04-14T20:05:00Z",
             "closed": False,
+            "eventMetadata": {"priceToBeat": 84198.123456},
         },
         {
             "condition_id": "def456",
@@ -355,6 +358,7 @@ def test_parse_5min_btc_markets():
     assert windows[0].condition_id == "abc123"
     assert windows[0].up_token_id == "tok_yes"
     assert windows[0].down_token_id == "tok_no"
+    assert windows[0].price_to_beat == 84198.123456
 
 
 def test_parse_book_event():
@@ -385,9 +389,12 @@ def test_window_dataclass():
         down_token_id="tok_down",
         end_time=1713100000.0,
         slug="btc-updown-5m-1776196800",
+        price_to_beat=84198.123456,
     )
     # Window start is 5 minutes before end
     assert w.start_time == 1713100000.0 - 300.0
+    # price_to_beat is the official Chainlink opening price
+    assert w.price_to_beat == 84198.123456
 ```
 
 **Step 2: Run test to verify it fails**
@@ -434,6 +441,7 @@ class Window:
     down_token_id: str
     end_time: float        # epoch seconds when window closes
     slug: str
+    price_to_beat: float   # official Chainlink opening price from eventMetadata
     up_ask: float | None = None
     up_ask_size: float | None = None
     down_ask: float | None = None
@@ -453,7 +461,12 @@ class Window:
 
 
 def parse_5min_btc_markets(markets: list[dict]) -> list[Window]:
-    """Filter Gamma API markets to active 5-min BTC Up/Down windows."""
+    """Filter Gamma API markets to active 5-min BTC Up/Down windows.
+
+    Each market must have eventMetadata.priceToBeat — the official
+    Chainlink opening price the contract resolves against. Markets
+    without this field are skipped.
+    """
     windows = []
     for m in markets:
         slug = m.get("slug", "")
@@ -461,6 +474,21 @@ def parse_5min_btc_markets(markets: list[dict]) -> list[Window]:
             continue
         if m.get("closed"):
             continue
+
+        # Extract priceToBeat — REQUIRED for correct displacement calc
+        event_meta = m.get("eventMetadata", {})
+        if isinstance(event_meta, str):
+            import json as _json
+            try:
+                event_meta = _json.loads(event_meta)
+            except (ValueError, TypeError):
+                event_meta = {}
+        price_to_beat = event_meta.get("priceToBeat")
+        if price_to_beat is None:
+            log.warning("Skipping %s: no priceToBeat in eventMetadata", slug)
+            continue
+        price_to_beat = float(price_to_beat)
+
         tokens = m.get("tokens", [])
         up_token = None
         down_token = None
@@ -489,6 +517,7 @@ def parse_5min_btc_markets(markets: list[dict]) -> list[Window]:
             down_token_id=down_token,
             end_time=end_epoch,
             slug=slug,
+            price_to_beat=price_to_beat,
         ))
     return windows
 
@@ -510,8 +539,12 @@ def parse_book_event(msg: dict) -> dict:
 
 
 async def fetch_active_windows() -> list[Window]:
-    """Fetch currently active 5-min BTC Up/Down markets from Gamma API."""
-    url = f"{GAMMA_API}/markets"
+    """Fetch currently active 5-min BTC Up/Down markets from Gamma API.
+
+    Uses the events endpoint which includes eventMetadata.priceToBeat —
+    the official Chainlink opening price the contract resolves against.
+    """
+    url = f"{GAMMA_API}/events"
     params = {
         "closed": "false",
         "limit": 100,
@@ -522,8 +555,16 @@ async def fetch_active_windows() -> list[Window]:
             if resp.status != 200:
                 log.error("Gamma API returned %d", resp.status)
                 return []
-            data = await resp.json()
-            return parse_5min_btc_markets(data)
+            events = await resp.json()
+            # Events contain markets as nested objects; flatten
+            all_markets = []
+            for event in events:
+                event_meta = event.get("eventMetadata", {})
+                for market in event.get("markets", [event]):
+                    # Attach eventMetadata to each market for parsing
+                    market["eventMetadata"] = event_meta
+                    all_markets.append(market)
+            return parse_5min_btc_markets(all_markets)
 
 
 async def subscribe_and_stream(
@@ -867,10 +908,9 @@ async def run_observer(duration_minutes: int = 60) -> None:
 
     # Track which window we're currently observing
     current_window = None
-    window_open_price = None
 
     async def on_book_update(window, side):
-        nonlocal current_window, window_open_price
+        nonlocal current_window
         if binance.latest_price is None:
             return
 
@@ -879,16 +919,16 @@ async def run_observer(duration_minutes: int = 60) -> None:
         if t_remaining < 0:
             return
 
-        # Record open price on first observation of a new window
+        # Use priceToBeat as the official opening reference
         if current_window is None or current_window.condition_id != window.condition_id:
             current_window = window
-            window_open_price = binance.latest_price
-            log.info("New window: %s, open price: %.2f", window.slug, window_open_price)
+            log.info(
+                "New window: %s, priceToBeat: %.6f (Binance: %.2f)",
+                window.slug, window.price_to_beat, binance.latest_price,
+            )
 
-        if window_open_price is None:
-            return
-
-        displacement = (binance.latest_price - window_open_price) / window_open_price
+        # displacement is Binance current vs Polymarket's official open
+        displacement = (binance.latest_price - window.price_to_beat) / window.price_to_beat
         returns = binance.get_5min_returns()
         sigma = compute_realized_vol(returns, VOLATILITY_LOOKBACK)
 
@@ -903,7 +943,7 @@ async def run_observer(duration_minutes: int = 60) -> None:
             timestamp=now,
             window_slug=window.slug,
             btc_price=binance.latest_price,
-            window_open_price=window_open_price,
+            window_open_price=window.price_to_beat,
             displacement=displacement,
             t_remaining=t_remaining,
             sigma_5min=sigma,
@@ -986,112 +1026,46 @@ cd /c/Users/Matt/polypocket && git add -A && git commit -m "feat: observer CLI w
 
 ---
 
-## Task 6: Investigate Chainlink Opening Price
+## Task 6: Validate priceToBeat Integration
+
+**Purpose:** The Chainlink opening price investigation is resolved. We now know:
+- Resolution source: Chainlink BTC/USD data stream (`https://data.chain.link/streams/btc-usd`)
+- Opening price: exposed as `eventMetadata.priceToBeat` in the Polymarket event API
+- Example: `priceToBeat: 71741.348981`
+
+This task validates that `fetch_active_windows()` correctly extracts `priceToBeat` from the live API.
 
 **Files:**
-- Create: `polypocket/feeds/chainlink.py`
-- Create: `tests/test_chainlink.py`
+- Create: `tests/test_price_to_beat_integration.py`
 
-**Purpose:** The market resolves on Chainlink BTC/USD, not Binance. We need to understand how Polymarket determines the "opening price" for each 5-min window. This task fetches a few resolved markets and inspects the resolution data.
-
-**Step 1: Write investigation script**
+**Step 1: Write integration test**
 
 ```python
-# polypocket/feeds/chainlink.py
-"""Chainlink BTC/USD price feed — the resolution source for 5-min windows.
-
-The Polymarket 5-min BTC markets resolve based on the Chainlink BTC/USD
-data stream (https://data.chain.link/streams/btc-usd).
-
-This module:
-1. Polls for the current Chainlink BTC/USD price
-2. Investigates how Polymarket maps Chainlink prices to window open/close
-"""
-
-import asyncio
-import logging
-import time
-
-import aiohttp
-
-log = logging.getLogger(__name__)
-
-GAMMA_API = "https://gamma-api.polymarket.com"
-
-
-async def fetch_resolved_5min_markets(limit: int = 10) -> list[dict]:
-    """Fetch recently resolved 5-min BTC markets to study resolution data."""
-    url = f"{GAMMA_API}/markets"
-    params = {
-        "closed": "true",
-        "limit": limit,
-        "order": "end_date_iso",
-        "ascending": "false",
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params) as resp:
-            data = await resp.json()
-            # Filter to 5-min BTC markets
-            import re
-            pattern = re.compile(r"btc-updown-5m-\d+")
-            return [m for m in data if pattern.match(m.get("slug", ""))]
-
-
-async def investigate_resolution():
-    """Print resolution details of recent 5-min windows.
-
-    Run: python -c "import asyncio; from polypocket.feeds.chainlink import investigate_resolution; asyncio.run(investigate_resolution())"
-    """
-    markets = await fetch_resolved_5min_markets(20)
-    print(f"\nFound {len(markets)} resolved 5-min BTC markets:\n")
-    for m in markets:
-        print(f"  Slug: {m.get('slug')}")
-        print(f"  Question: {m.get('question')}")
-        print(f"  End date: {m.get('end_date_iso')}")
-        print(f"  Outcome: {m.get('outcome')}")
-        print(f"  Resolution source: {m.get('resolution_source')}")
-        # Print any resolution-related fields
-        for key in sorted(m.keys()):
-            if "resol" in key.lower() or "price" in key.lower() or "result" in key.lower():
-                print(f"  {key}: {m[key]}")
-        print()
-```
-
-**Step 2: Write a basic test**
-
-```python
-# tests/test_chainlink.py
-from polypocket.feeds.chainlink import fetch_resolved_5min_markets
+# tests/test_price_to_beat_integration.py
+"""Integration test: verify priceToBeat is available from live Polymarket API."""
 import pytest
+from polypocket.feeds.polymarket import fetch_active_windows
 
 
 @pytest.mark.asyncio
-async def test_fetch_resolved_markets_returns_list():
-    """Integration test — hits real Gamma API."""
-    markets = await fetch_resolved_5min_markets(5)
-    assert isinstance(markets, list)
-    # May be empty if no resolved markets available
+async def test_active_windows_have_price_to_beat():
+    """Fetch live windows and verify each has a numeric priceToBeat."""
+    windows = await fetch_active_windows()
+    # May be empty if no active 5-min markets right now
+    for w in windows:
+        assert w.price_to_beat > 0, f"{w.slug} has invalid priceToBeat: {w.price_to_beat}"
+        assert isinstance(w.price_to_beat, float)
 ```
 
-**Step 3: Run the investigation**
+**Step 2: Run integration test**
 
-Run: `cd /c/Users/Matt/polypocket && python -c "import asyncio; from polypocket.feeds.chainlink import investigate_resolution; asyncio.run(investigate_resolution())"`
-Expected: Prints resolution details. Study the output to understand:
-- What fields contain the opening/closing prices
-- Whether resolution_source confirms Chainlink
-- What timestamp precision is used
+Run: `cd /c/Users/Matt/polypocket && python -m pytest tests/test_price_to_beat_integration.py -v`
+Expected: PASS (if 5-min markets are active) or SKIP/empty (if none are active at this time)
 
-**Step 4: Document findings**
-
-Based on the investigation output, update `polypocket/feeds/chainlink.py` with:
-- The exact field names for open/close prices
-- How to compute the opening price for a given window
-- Any discrepancy between Chainlink and Binance timing
-
-**Step 5: Commit**
+**Step 3: Commit**
 
 ```bash
-cd /c/Users/Matt/polypocket && git add -A && git commit -m "feat: Chainlink feed + resolution investigation"
+cd /c/Users/Matt/polypocket && git add -A && git commit -m "test: validate priceToBeat extraction from live Polymarket API"
 ```
 
 ---
@@ -1939,7 +1913,7 @@ class Bot:
 
         # State per window
         self._current_window_id: str | None = None
-        self._window_open_price: float | None = None
+        self._current_window: Window | None = None  # holds price_to_beat
         self._window_traded: bool = False
         self._open_trade: dict | None = None  # {trade_id, side, entry_price, size}
 
@@ -1977,16 +1951,15 @@ class Bot:
                 await self._settle_previous_window(window)
 
             self._current_window_id = window.condition_id
-            self._window_open_price = self.binance.latest_price
             self._window_traded = False
             self._open_trade = None
-            log.info("New window: %s open=%.2f", window.slug, self._window_open_price)
+            log.info(
+                "New window: %s priceToBeat=%.6f (Binance=%.2f)",
+                window.slug, window.price_to_beat, self.binance.latest_price,
+            )
 
-        if self._window_open_price is None:
-            return
-
-        # Compute signal inputs
-        displacement = (self.binance.latest_price - self._window_open_price) / self._window_open_price
+        # Compute signal inputs — displacement is Binance current vs official open
+        displacement = (self.binance.latest_price - window.price_to_beat) / window.price_to_beat
         returns = self.binance.get_5min_returns()
         sigma = compute_realized_vol(returns, VOLATILITY_LOOKBACK)
         if sigma <= 0:
@@ -1997,7 +1970,7 @@ class Bot:
         model_p = compute_model_p_up(displacement, max(t_remaining, 0), sigma)
         self.stats.update({
             "btc_price": self.binance.latest_price,
-            "window_open_price": self._window_open_price,
+            "window_open_price": window.price_to_beat,
             "displacement": displacement,
             "model_p_up": model_p,
             "market_p_up": window.up_ask,
@@ -2012,7 +1985,8 @@ class Bot:
         # Window expired — settle
         if t_remaining <= 0:
             if self._open_trade:
-                outcome = "up" if self.binance.latest_price >= self._window_open_price else "down"
+                # Outcome is determined by final price vs priceToBeat
+                outcome = "up" if self.binance.latest_price >= window.price_to_beat else "down"
                 await self._settle_trade(outcome)
             return
 
@@ -2090,12 +2064,12 @@ class Bot:
             from polypocket.executor import TradeResult
             self.on_trade(TradeResult(success=True, trade_id=t["trade_id"], pnl=pnl), None, None)
 
-    async def _settle_previous_window(self, new_window: Window) -> None:
-        """Settle the previous window's trade based on final BTC price."""
-        if not self._open_trade or not self._window_open_price:
+    async def _settle_previous_window(self, prev_window: Window) -> None:
+        """Settle the previous window's trade based on final BTC price vs priceToBeat."""
+        if not self._open_trade:
             return
-        # Use current BTC price as the close of the previous window
-        outcome = "up" if self.binance.latest_price >= self._window_open_price else "down"
+        # Outcome: did BTC finish above priceToBeat?
+        outcome = "up" if self.binance.latest_price >= prev_window.price_to_beat else "down"
         await self._settle_trade(outcome)
 
     async def run(self) -> None:
@@ -2431,6 +2405,15 @@ cd /c/Users/Matt/polypocket && git add -A && git commit -m "feat: Textual TUI da
 ---
 
 ## Task 13: Backtester
+
+**IMPORTANT CAVEAT — Proxy Backtest:**
+This backtester uses Binance candle opens as a proxy for `priceToBeat` since
+historical Polymarket `eventMetadata` is not readily available. This means:
+- The backtest evaluates the model's *calibration* (is P(Up) accurate?) reliably
+- But it does NOT perfectly reproduce live edge detection, because the Binance
+  open and Chainlink priceToBeat may differ by a few basis points
+- Treat backtest results as directionally indicative, not exact live performance
+- Live paper trading (which uses real priceToBeat) is the true validation gate
 
 **Files:**
 - Create: `polypocket/backtester.py`
@@ -2791,14 +2774,14 @@ cd /c/Users/Matt/polypocket && git push -u origin main
 | 3 | Polymarket feed (market discovery + WS) | -- |
 | 4 | Observation logger (P(Up) model) | -- |
 | 5 | Observer CLI (wire feeds) | -- |
-| 6 | Chainlink investigation | **GATE: understand resolution source** |
+| 6 | Validate priceToBeat integration | Verify live API returns priceToBeat |
 | 7 | Signal engine | -- |
 | 8 | Ledger (SQLite) | -- |
 | 9 | Paper executor | -- |
 | 10 | Risk manager | -- |
 | 11 | Bot orchestrator | -- |
 | 12 | TUI dashboard | -- |
-| 13 | Backtester | **GATE: validate strategy has edge** |
+| 13 | Backtester | **PROXY ONLY: live paper trading is true validation** |
 | 14 | Integration + push | -- |
 
 Tasks 1-5 can be built and tested independently. Task 6 is an investigation gate. Tasks 7-12 build the trading pipeline. Task 13 is a validation gate.

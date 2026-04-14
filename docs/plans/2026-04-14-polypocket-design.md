@@ -169,7 +169,7 @@ Polymarket WS (odds) --------+
 | Polymarket Gamma API | Active 5-min market discovery | REST | Find windows, get token IDs |
 | Polymarket CLOB WS | Order book for active window | WebSocket | Current Up/Down prices |
 
-**Important:** Market resolves on Chainlink prices, not Binance. Use Binance for speed, Chainlink for the opening price reference. Need to reverse-engineer how Polymarket determines the exact opening price from a few resolved markets.
+**Critical — priceToBeat (RESOLVED):** Market resolves on Chainlink BTC/USD, not Binance. Polymarket exposes the official opening reference price as `eventMetadata.priceToBeat` in the event API (e.g., `priceToBeat: 71741.348981`). ALL displacement calculations MUST use this value as the baseline. Binance is the fast current price feed; `priceToBeat` is the contract's official open. Using Binance-derived opens would model the wrong target.
 
 ## Backtester
 
