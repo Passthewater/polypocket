@@ -18,6 +18,15 @@ def main() -> None:
         duration = int(sys.argv[2]) if len(sys.argv) > 2 else 60
         asyncio.run(run_observer(duration))
         return
+    if command == "run":
+        from polypocket.bot import Bot
+
+        bot = Bot()
+        try:
+            asyncio.run(bot.run())
+        except KeyboardInterrupt:
+            pass
+        return
 
     print(f"Unknown command: {command}")
     print("Usage: python -m polypocket observe [duration_minutes]")
