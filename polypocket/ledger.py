@@ -36,6 +36,73 @@ def init_db(db_path: str) -> None:
             VALUES (1, {PAPER_STARTING_BALANCE});
             """
         )
+        duplicates = conn.execute(
+            """
+            SELECT window_slug
+            FROM trades
+            GROUP BY window_slug
+            HAVING COUNT(*) > 1
+            ORDER BY window_slug
+            """
+        ).fetchall()
+        if duplicates:
+            slugs = ", ".join(row[0] for row in duplicates)
+            raise RuntimeError(f"Duplicate window_slug values exist: {slugs}")
+
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_window_slug
+                ON trades(window_slug);
+            """
+        )
+
+
+def find_duplicate_window_slugs(db_path: str) -> list[str]:
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT window_slug
+            FROM trades
+            GROUP BY window_slug
+            HAVING COUNT(*) > 1
+            ORDER BY window_slug
+            """
+        ).fetchall()
+        return [row[0] for row in rows]
+
+
+def find_trade_by_window_slug(db_path: str, window_slug: str) -> dict | None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT *
+            FROM trades
+            WHERE window_slug = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (window_slug,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_open_trade_by_window_slug(db_path: str, window_slug: str) -> dict | None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT *
+            FROM trades
+            WHERE window_slug = ? AND status = 'open'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (window_slug,),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def log_trade(
