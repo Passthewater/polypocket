@@ -35,6 +35,11 @@ def test_paper_trade_up_win():
     )
     assert result.success is True
     assert result.pnl > 0
+    trade = find_trade_by_window_slug(db_path, "btc-5m-123")
+    assert trade["side"] == "up"
+    assert trade["status"] == "settled"
+    assert trade["model_p_up"] == pytest.approx(0.75)
+    assert trade["market_p_up"] == pytest.approx(0.55)
     balance = get_paper_balance(db_path)
     assert balance > 990.0
     os.unlink(db_path)
@@ -181,8 +186,12 @@ def test_live_trade_uses_deterministic_client_order_id():
             "client_order_id": "window-eth-5m-999",
         }
     ]
-    assert result.trade_id == find_trade_by_window_slug(db_path, "eth-5m-999")["id"]
-    assert find_trade_by_window_slug(db_path, "eth-5m-999")["status"] == "open"
+    trade = find_trade_by_window_slug(db_path, "eth-5m-999")
+    assert result.trade_id == trade["id"]
+    assert trade["status"] == "open"
+    assert trade["side"] == "down"
+    assert trade["model_p_up"] == pytest.approx(0.25)
+    assert trade["market_p_up"] == pytest.approx(0.45)
     os.unlink(db_path)
 
 

@@ -84,6 +84,8 @@ async def test_bot_executes_once_per_window(tmp_path: Path, monkeypatch):
     assert bot.stats["down_ask"] == 0.45
     assert bot.stats["quote_status"] == "valid"
     assert bot.stats["execution_status"] == "open"
+    assert bot.stats["preview_side"] == "up"
+    assert bot.stats["preview_market_price"] == 0.55
     assert execute_mock.call_count == 1
 
 
@@ -120,6 +122,8 @@ async def test_bot_skips_one_sided_book_and_sets_quote_status(tmp_path: Path, mo
     assert bot.stats["down_ask"] is None
     assert bot.stats["quote_status"] == "missing-side"
     assert bot.stats["execution_status"] == "skipped"
+    assert bot.stats["preview_side"] == "up"
+    assert bot.stats["preview_market_price"] == 0.55
     assert bot._open_trade is None
     evaluate_mock.assert_not_called()
     execute_mock.assert_not_called()
@@ -309,6 +313,9 @@ async def test_bot_preview_edge_exposes_down_side_price(tmp_path: Path):
     assert bot.stats["edge"] == pytest.approx(expected_down_edge)
     assert bot.stats["preview_side"] == "down"
     assert bot.stats["preview_market_price"] == window.down_ask
+    assert bot.stats["up_ask"] == window.up_ask
+    assert bot.stats["down_ask"] == window.down_ask
+    assert bot.stats["quote_status"] == "overround"
     assert bot.stats["edge"] != pytest.approx(raw_up_edge)
 
 
@@ -341,3 +348,6 @@ async def test_bot_preview_edge_exposes_up_side_price(tmp_path: Path):
     assert bot.stats["edge"] == pytest.approx(expected_up_edge)
     assert bot.stats["preview_side"] == "up"
     assert bot.stats["preview_market_price"] == window.up_ask
+    assert bot.stats["up_ask"] == window.up_ask
+    assert bot.stats["down_ask"] == window.down_ask
+    assert bot.stats["quote_status"] == "overround"

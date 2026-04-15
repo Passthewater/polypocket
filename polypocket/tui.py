@@ -27,6 +27,10 @@ class StatusPanel(Static):
         edge = stats.get("edge")
         preview_side = stats.get("preview_side")
         preview_market_price = stats.get("preview_market_price")
+        up_ask = stats.get("up_ask")
+        down_ask = stats.get("down_ask")
+        quote_status = stats.get("quote_status")
+        execution_status = stats.get("execution_status")
         sigma = stats.get("sigma_5min")
         position = stats.get("position")
 
@@ -39,9 +43,13 @@ class StatusPanel(Static):
         lines.append(f"Displacement: {displacement:+.4%}" if displacement is not None else "Displacement: --")
         lines.append(f"P(Up) Model: {model:.1%}" if model is not None else "P(Up) Model: --")
         lines.append(f"P(Up) Market: {market:.1%}" if market is not None else "P(Up) Market: --")
+        lines.append(f"Up Ask: {up_ask:.1%}" if up_ask is not None else "Up Ask: --")
+        lines.append(f"Down Ask: {down_ask:.1%}" if down_ask is not None else "Down Ask: --")
         if preview_side is not None and preview_market_price is not None and edge is not None:
             lines.append(f"Preview: {preview_side.upper()} @ {preview_market_price:.1%}")
         lines.append(f"Edge: {edge:+.1%}" if edge is not None else "Edge: --")
+        lines.append(f"Quote Status: {quote_status}" if quote_status else "Quote Status: --")
+        lines.append(f"Execution Status: {execution_status}" if execution_status else "Execution Status: --")
         lines.append(f"Volatility: {sigma:.4%}" if sigma else "Volatility: --")
         lines.append("")
         lines.append(f"Paper Balance: ${balance:,.2f}")
@@ -70,12 +78,12 @@ class WindowPanel(Static):
             lines.append("Time Left: --")
 
         if model is not None and market is not None:
-            lines.append(f"Model: {model:.1%}  Market: {market:.1%}")
+            lines.append(f"Model: {model:.1%}  Up Ask: {market:.1%}")
             if edge is not None:
                 indicator = " SIGNAL" if edge >= MIN_EDGE_THRESHOLD else ""
                 if preview_side is not None and preview_market_price is not None:
                     lines.append(
-                        f"Preview: {preview_side.upper()} {preview_market_price:.1%}  "
+                        f"Preview: {preview_side.upper()} @ {preview_market_price:.1%}  "
                         f"Edge: {edge:+.1%}{indicator}"
                     )
                 else:
