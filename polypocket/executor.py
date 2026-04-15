@@ -2,12 +2,14 @@
 
 import logging
 from dataclasses import dataclass
+from typing import Protocol
 
 from polypocket.config import FEE_RATE
 from polypocket.ledger import (
     credit_paper_balance,
     deduct_paper_balance,
     get_paper_balance,
+    find_trade_by_window_slug,
     log_trade,
     update_trade,
 )
@@ -24,6 +26,15 @@ class TradeResult:
     error: str | None = None
 
 
+class LiveOrderClient(Protocol):
+    def submit_fok(self, side: str, price: float, size: float, client_order_id: str) -> str:
+        ...
+
+
+def _window_client_order_id(window_slug: str) -> str:
+    return f"window-{window_slug}"
+
+
 def execute_paper_trade(
     db_path: str,
     signal: Signal,
@@ -33,6 +44,14 @@ def execute_paper_trade(
     outcome: str | None = None,
 ) -> TradeResult:
     """Execute a paper trade, optionally settling immediately."""
+    existing_trade = find_trade_by_window_slug(db_path, window_slug)
+    if existing_trade is not None:
+        return TradeResult(
+            success=False,
+            trade_id=existing_trade["id"],
+            error="window-already-consumed",
+        )
+
     cost = entry_price * size
     fees = cost * FEE_RATE
 
@@ -84,6 +103,48 @@ def execute_paper_trade(
         )
 
     return TradeResult(success=True, trade_id=trade_id, pnl=pnl)
+
+
+def execute_live_trade(
+    db_path: str,
+    signal: Signal,
+    entry_price: float,
+    size: float,
+    window_slug: str,
+    client: LiveOrderClient,
+) -> TradeResult:
+    existing_trade = find_trade_by_window_slug(db_path, window_slug)
+    if existing_trade is not None:
+        return TradeResult(
+            success=False,
+            trade_id=existing_trade["id"],
+            error="window-already-consumed",
+        )
+
+    client_order_id = _window_client_order_id(window_slug)
+    client.submit_fok(
+        side=signal.side,
+        price=entry_price,
+        size=size,
+        client_order_id=client_order_id,
+    )
+
+    fees = entry_price * size * FEE_RATE
+    trade_id = log_trade(
+        db_path=db_path,
+        window_slug=window_slug,
+        side=signal.side,
+        entry_price=entry_price,
+        size=size,
+        fees=fees,
+        model_p_up=signal.model_p_up,
+        market_p_up=signal.market_price,
+        edge=signal.edge,
+        outcome=None,
+        pnl=None,
+        status="open",
+    )
+    return TradeResult(success=True, trade_id=trade_id, pnl=None)
 
 
 def settle_paper_trade(

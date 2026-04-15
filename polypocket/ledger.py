@@ -92,6 +92,7 @@ def find_duplicate_window_slugs(db_path: str) -> list[str]:
 
 
 def find_trade_by_window_slug(db_path: str, window_slug: str) -> dict | None:
+    """Return the most recent trade for a window slug, if one exists."""
     with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
