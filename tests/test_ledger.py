@@ -210,3 +210,14 @@ def test_paper_balance():
     credit_paper_balance(db_path, 60.0)
     assert get_paper_balance(db_path) == 1010.0
     os.unlink(db_path)
+
+
+def test_init_creates_window_snapshots_table():
+    db_path = make_db()
+    conn = sqlite3.connect(db_path)
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='window_snapshots'"
+    ).fetchall()
+    conn.close()
+    assert len(tables) == 1
+    os.unlink(db_path)

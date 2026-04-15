@@ -68,6 +68,45 @@ def init_db(db_path: str) -> None:
                 ON trades(window_slug)
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS window_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    window_slug TEXT NOT NULL,
+                    snapshot_type TEXT NOT NULL,
+                    btc_price REAL,
+                    window_open_price REAL,
+                    ptb_provisional INTEGER,
+                    displacement REAL,
+                    sigma_5min REAL,
+                    model_p_up REAL,
+                    t_remaining REAL,
+                    up_ask REAL,
+                    down_ask REAL,
+                    market_p_up REAL,
+                    edge REAL,
+                    preview_side TEXT,
+                    quote_status TEXT,
+                    up_book_json TEXT,
+                    down_book_json TEXT,
+                    trade_fired INTEGER,
+                    skip_reason TEXT,
+                    outcome TEXT,
+                    final_price REAL,
+                    UNIQUE(window_slug, snapshot_type)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_snapshots_window ON window_snapshots(window_slug)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_snapshots_type ON window_snapshots(snapshot_type)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON window_snapshots(timestamp DESC)"
+            )
             conn.commit()
         except Exception:
             conn.rollback()
