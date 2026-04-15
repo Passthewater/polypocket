@@ -21,7 +21,7 @@ from polypocket.feeds.polymarket import (
     fetch_resolution,
     subscribe_and_stream,
 )
-from polypocket.ledger import find_trade_by_window_slug, init_db, log_snapshot
+from polypocket.ledger import find_trade_by_window_slug, find_unsettled_trades, init_db, log_snapshot
 from polypocket.observer import compute_model_p_up, compute_realized_vol
 from polypocket.quotes import QuoteSnapshot, validate_quote
 from polypocket.risk import RiskManager
@@ -141,6 +141,11 @@ class Bot:
                     "status": recovered_trade["status"],
                 }
                 self.stats["position"] = self._format_position(self._open_trade)
+                # Remove from pending list to avoid double settlement
+                self._pending_settlements = [
+                    p for p in self._pending_settlements
+                    if p["trade_id"] != recovered_trade["id"]
+                ]
 
             if window.price_to_beat is not None:
                 self._ptb_provisional = False
@@ -489,6 +494,21 @@ class Bot:
     async def run(self) -> None:
         init_db(self.db_path)
         log.info("Polypocket bot starting (mode=%s)", TRADING_MODE)
+
+        # Recover unsettled trades from previous runs
+        unsettled = find_unsettled_trades(self.db_path)
+        for row in unsettled:
+            self._pending_settlements.append({
+                "trade_id": row["id"],
+                "side": row["side"],
+                "entry_price": row["entry_price"],
+                "size": row["size"],
+                "mode": TRADING_MODE,
+                "status": row["status"],
+                "window_slug": row["window_slug"],
+            })
+        if unsettled:
+            log.info("Recovered %d unsettled trade(s) from database", len(unsettled))
 
         async def poll_and_stream():
             while not self.stop.is_set():

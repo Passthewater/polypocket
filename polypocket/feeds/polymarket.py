@@ -374,7 +374,9 @@ async def subscribe_and_stream(
             return
 
         try:
-            async with websockets.connect(POLYMARKET_WS) as websocket:
+            async with websockets.connect(
+                POLYMARKET_WS, ping_interval=None
+            ) as websocket:
                 await websocket.send(
                     json.dumps({
                         "type": "market",

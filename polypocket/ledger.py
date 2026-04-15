@@ -160,6 +160,21 @@ def get_open_trade_by_window_slug(db_path: str, window_slug: str) -> dict | None
         return dict(row) if row else None
 
 
+def find_unsettled_trades(db_path: str) -> list[dict]:
+    """Return all trades with status 'open' or 'reserved' (not yet settled)."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM trades
+            WHERE status IN ('open', 'reserved')
+            ORDER BY id
+            """,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def log_trade(
     db_path: str,
     window_slug: str,
