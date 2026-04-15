@@ -467,6 +467,14 @@ class Bot:
                     else:
                         self.risk.record_loss()
                     log.info("SETTLED pending: %s -> P&L $%.2f", outcome.upper(), pnl)
+                log_snapshot(
+                    self.db_path,
+                    window_slug=trade["window_slug"],
+                    snapshot_type="close",
+                    stats=self.stats,
+                    trade_fired=True,
+                    outcome=outcome,
+                )
                 if self.on_trade:
                     self.on_trade(
                         TradeResult(success=True, trade_id=trade["trade_id"], pnl=pnl if trade.get("mode") != "live" else None),
