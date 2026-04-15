@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from polypocket.config import BOOK_MAX_TOTAL_ASK
+import polypocket.config as config
 
 
 @dataclass
@@ -24,7 +24,7 @@ def validate_quote(snapshot: QuoteSnapshot) -> QuoteValidation:
     if not 0.0 <= snapshot.up_ask <= 1.0 or not 0.0 <= snapshot.down_ask <= 1.0:
         return QuoteValidation(valid=False, reason="ask-out-of-range")
 
-    if snapshot.up_ask + snapshot.down_ask > BOOK_MAX_TOTAL_ASK:
+    if snapshot.up_ask + snapshot.down_ask > config.BOOK_MAX_TOTAL_ASK:
         return QuoteValidation(valid=False, reason="overround")
 
     return QuoteValidation(valid=True)
