@@ -50,6 +50,8 @@ class Bot:
         self._ptb_last_fetch: float = 0.0
         self._ptb_provisional: bool = False
         self._resolution_last_fetch: float = 0.0
+        # Trades from past windows awaiting resolution
+        self._pending_settlements: list[dict] = []
 
         self.stats = {
             "btc_price": None,
@@ -83,6 +85,9 @@ class Bot:
         del side
         if self.binance.latest_price is None:
             return
+
+        # Resolve pending trades from previous windows in the background
+        await self._poll_pending_settlements()
 
         now = time.time()
         t_remaining = window.end_time - now
@@ -203,21 +208,29 @@ class Bot:
 
         if t_remaining <= 0:
             if self._open_trade:
-                now_mono = time.time()
-                if now_mono - self._resolution_last_fetch >= 5.0:
-                    self._resolution_last_fetch = now_mono
-                    outcome = await fetch_resolution(window.slug)
-                    if outcome is not None:
-                        log.info(
-                            "Official resolution for %s: %s",
-                            window.slug,
-                            outcome.upper(),
-                        )
-                        await self._settle_trade(outcome)
-                    else:
-                        self.stats["execution_status"] = "awaiting-resolution"
-                        if self.on_stats_update:
-                            self.on_stats_update(self.stats)
+                # Try immediate resolution; if unavailable, park in pending
+                outcome = await fetch_resolution(window.slug)
+                if outcome is not None:
+                    log.info(
+                        "Official resolution for %s: %s",
+                        window.slug,
+                        outcome.upper(),
+                    )
+                    await self._settle_trade(outcome)
+                else:
+                    self._pending_settlements.append({
+                        **self._open_trade,
+                        "window_slug": window.slug,
+                    })
+                    self._open_trade = None
+                    self.stats["position"] = None
+                    self.stats["execution_status"] = None
+                    log.info(
+                        "Parked trade for expired window %s, awaiting resolution",
+                        window.slug,
+                    )
+                    if self.on_stats_update:
+                        self.on_stats_update(self.stats)
             return
 
         if self._window_traded:
@@ -337,8 +350,10 @@ class Bot:
             self.on_trade(TradeResult(success=True, trade_id=trade["trade_id"], pnl=pnl), None, None)
 
     async def _settle_previous_window(self, prev_window: Window) -> None:
+        """Move unresolved trade to pending list so the bot can advance."""
         if not self._open_trade:
             return
+        # Try immediate resolution first
         outcome = await fetch_resolution(prev_window.slug)
         if outcome is not None:
             log.info(
@@ -348,12 +363,56 @@ class Bot:
             )
             await self._settle_trade(outcome)
         else:
-            # Resolution not yet available — keep the trade open,
-            # it will be settled on the next book update tick.
+            # Park trade in pending — it will be settled by background polling
+            self._pending_settlements.append({
+                **self._open_trade,
+                "window_slug": prev_window.slug,
+            })
+            self._open_trade = None
+            self.stats["position"] = None
             log.info(
-                "Waiting for official resolution of %s before settling",
+                "Parked trade for %s in pending settlements, moving to next window",
                 prev_window.slug,
             )
+
+    async def _poll_pending_settlements(self) -> None:
+        """Try to resolve all pending trades from past windows."""
+        if not self._pending_settlements:
+            return
+        still_pending = []
+        for trade in self._pending_settlements:
+            outcome = await fetch_resolution(trade["window_slug"])
+            if outcome is not None:
+                log.info(
+                    "Resolved pending trade %s: %s",
+                    trade["window_slug"],
+                    outcome.upper(),
+                )
+                if trade.get("mode") == "live":
+                    settle_live_trade(self.db_path, trade["trade_id"], outcome)
+                else:
+                    pnl = settle_paper_trade(
+                        self.db_path,
+                        trade["trade_id"],
+                        trade["entry_price"],
+                        trade["size"],
+                        trade["side"],
+                        outcome,
+                    )
+                    if pnl > 0:
+                        self.risk.record_win()
+                    else:
+                        self.risk.record_loss()
+                    log.info("SETTLED pending: %s -> P&L $%.2f", outcome.upper(), pnl)
+                if self.on_trade:
+                    self.on_trade(
+                        TradeResult(success=True, trade_id=trade["trade_id"], pnl=pnl if trade.get("mode") != "live" else None),
+                        None,
+                        None,
+                    )
+            else:
+                still_pending.append(trade)
+        self._pending_settlements = still_pending
 
     async def run(self) -> None:
         init_db(self.db_path)

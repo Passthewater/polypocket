@@ -344,7 +344,11 @@ async def subscribe_and_stream(
     on_book_update,
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    """Subscribe to token IDs and stream best-ask updates."""
+    """Subscribe to token IDs and stream best-ask updates.
+
+    Returns when all windows have expired (with a short grace period)
+    so the caller can re-fetch active windows and resubscribe.
+    """
     token_to_window: dict[str, tuple[Window, str]] = {}
     for window in windows:
         token_to_window[window.up_token_id] = (window, "up")
@@ -353,8 +357,17 @@ async def subscribe_and_stream(
     if not token_to_window:
         return
 
+    latest_end = max(w.end_time for w in windows)
+    # Grace period: keep listening briefly after expiry so the bot can
+    # attempt resolution before we disconnect and re-fetch.
+    EXPIRY_GRACE_S = 15
+
     backoff = 1
     while stop_event is None or not stop_event.is_set():
+        if time.time() > latest_end + EXPIRY_GRACE_S:
+            log.info("All subscribed windows expired, returning to fetch new windows")
+            return
+
         try:
             async with websockets.connect(POLYMARKET_WS) as websocket:
                 await websocket.send(
@@ -368,6 +381,10 @@ async def subscribe_and_stream(
                 last_ping = time.time()
 
                 while stop_event is None or not stop_event.is_set():
+                    if time.time() > latest_end + EXPIRY_GRACE_S:
+                        log.info("All subscribed windows expired, returning to fetch new windows")
+                        return
+
                     if time.time() - last_ping >= HEARTBEAT_INTERVAL:
                         await websocket.send("PING")
                         last_ping = time.time()
