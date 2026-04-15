@@ -11,7 +11,7 @@ from textual.containers import Horizontal
 from textual.widgets import Footer, Header, RichLog, Static
 
 from polypocket.bot import Bot
-from polypocket.config import FEE_RATE, MAX_DAILY_LOSS, MIN_EDGE_THRESHOLD, POSITION_SIZE_USDC, TRADING_MODE
+from polypocket.config import MAX_DAILY_LOSS, MIN_EDGE_THRESHOLD, POSITION_SIZE_USDC, TRADING_MODE
 from polypocket.ledger import get_daily_pnl, get_paper_balance, get_recent_trades, get_session_stats
 
 log = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ class WindowPanel(Static):
         if model is not None and market is not None:
             lines.append(f"Model: {model:.1%}  Market: {market:.1%}")
             if edge is not None:
-                indicator = " SIGNAL" if abs(edge) > MIN_EDGE_THRESHOLD + FEE_RATE else ""
+                indicator = " SIGNAL" if edge >= MIN_EDGE_THRESHOLD else ""
                 lines.append(f"Edge: {edge:+.1%}{indicator}")
         self.update("\n".join(lines))
 

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 
-from polypocket.config import PAPER_DB_PATH, POSITION_SIZE_USDC, TRADING_MODE, VOLATILITY_LOOKBACK
+from polypocket.config import FEE_RATE, PAPER_DB_PATH, POSITION_SIZE_USDC, TRADING_MODE, VOLATILITY_LOOKBACK
 from polypocket.executor import TradeResult, execute_paper_trade, settle_paper_trade
 from polypocket.feeds.binance import BinanceFeed
 from polypocket.feeds.polymarket import Window, fetch_active_windows, subscribe_and_stream
@@ -85,6 +85,11 @@ class Bot:
             sigma = 0.001
 
         model_p_up = compute_model_p_up(displacement, max(t_remaining, 0), sigma)
+        up_edge = None if window.up_ask is None else model_p_up - (window.up_ask * (1 + FEE_RATE))
+        down_edge = None if window.down_ask is None else (1 - model_p_up) - (window.down_ask * (1 + FEE_RATE))
+        preview_edge = None
+        if up_edge is not None or down_edge is not None:
+            preview_edge = max(value for value in (up_edge, down_edge) if value is not None)
         self.stats.update(
             {
                 "btc_price": self.binance.latest_price,
@@ -92,7 +97,7 @@ class Bot:
                 "displacement": displacement,
                 "model_p_up": model_p_up,
                 "market_p_up": window.up_ask,
-                "edge": (model_p_up - window.up_ask) if window.up_ask is not None else None,
+                "edge": preview_edge,
                 "sigma_5min": sigma,
                 "t_remaining": t_remaining,
                 "window_slug": window.slug,

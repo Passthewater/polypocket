@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from polypocket.config import FEE_RATE
 from polypocket.executor import TradeResult
 from polypocket.feeds.polymarket import Window
 from polypocket.ledger import init_db
@@ -80,3 +81,34 @@ async def test_bot_executes_once_per_window(tmp_path: Path, monkeypatch):
     assert bot._open_trade["trade_id"] == 1
     assert bot.stats["position"] is not None
     assert execute_mock.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_bot_preview_edge_uses_fee_adjusted_side_specific_logic(tmp_path: Path):
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84000.0
+    bot.signal_engine.evaluate = lambda **kwargs: None
+
+    window = Window(
+        condition_id="abc123",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-123",
+        price_to_beat=84198.0,
+        up_ask=0.99,
+        down_ask=0.15,
+    )
+
+    await bot._on_book_update(window, "up")
+
+    expected_down_edge = (1 - bot.stats["model_p_up"]) - (window.down_ask * (1 + FEE_RATE))
+    raw_up_edge = bot.stats["model_p_up"] - window.up_ask
+    assert bot.stats["edge"] == pytest.approx(expected_down_edge)
+    assert bot.stats["edge"] != pytest.approx(raw_up_edge)
