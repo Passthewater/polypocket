@@ -5,11 +5,18 @@ import logging
 import time
 
 from polypocket.config import FEE_RATE, PAPER_DB_PATH, POSITION_SIZE_USDC, TRADING_MODE, VOLATILITY_LOOKBACK
-from polypocket.executor import TradeResult, execute_paper_trade, settle_paper_trade
+from polypocket.executor import (
+    LiveOrderClient,
+    TradeResult,
+    execute_live_trade,
+    execute_paper_trade,
+    settle_paper_trade,
+)
 from polypocket.feeds.binance import BinanceFeed
 from polypocket.feeds.polymarket import Window, fetch_active_windows, subscribe_and_stream
-from polypocket.ledger import init_db
+from polypocket.ledger import get_open_trade_by_window_slug, init_db
 from polypocket.observer import compute_model_p_up, compute_realized_vol
+from polypocket.quotes import QuoteSnapshot, validate_quote
 from polypocket.risk import RiskManager
 from polypocket.signal import SignalEngine
 
@@ -17,8 +24,13 @@ log = logging.getLogger(__name__)
 
 
 class Bot:
-    def __init__(self, db_path: str = PAPER_DB_PATH):
+    def __init__(
+        self,
+        db_path: str = PAPER_DB_PATH,
+        live_order_client: LiveOrderClient | None = None,
+    ):
         self.db_path = db_path
+        self.live_order_client = live_order_client
         self.binance = BinanceFeed()
         self.signal_engine = SignalEngine()
         self.risk = RiskManager(db_path=db_path)
@@ -40,6 +52,10 @@ class Bot:
             "preview_market_price": None,
             "sigma_5min": None,
             "t_remaining": None,
+            "up_ask": None,
+            "down_ask": None,
+            "quote_status": None,
+            "execution_status": None,
             "window_slug": None,
             "position": None,
         }
@@ -64,6 +80,23 @@ class Bot:
             self._current_window = window
             self._window_traded = False
             self._open_trade = None
+            self.stats["position"] = None
+            self.stats["execution_status"] = None
+
+            open_trade = get_open_trade_by_window_slug(self.db_path, window.slug)
+            if open_trade is not None:
+                self._window_traded = True
+                self._open_trade = {
+                    "trade_id": open_trade["id"],
+                    "side": open_trade["side"],
+                    "entry_price": open_trade["entry_price"],
+                    "size": open_trade["size"],
+                }
+                self.stats["position"] = (
+                    f'{open_trade["size"]:.1f} {open_trade["side"].upper()}'
+                    f' @ ${open_trade["entry_price"]:.3f}'
+                )
+                self.stats["execution_status"] = "recovery"
 
             # If priceToBeat missing (Chainlink delay), use Binance price as anchor
             if window.price_to_beat is None:
@@ -101,6 +134,10 @@ class Bot:
                 preview_edge = down_edge
                 preview_side = "down"
                 preview_market_price = window.down_ask
+        quote_validation = validate_quote(
+            QuoteSnapshot(up_ask=window.up_ask, down_ask=window.down_ask)
+        )
+        quote_status = quote_validation.reason if not quote_validation.valid else "valid"
         self.stats.update(
             {
                 "btc_price": self.binance.latest_price,
@@ -113,6 +150,9 @@ class Bot:
                 "preview_market_price": preview_market_price,
                 "sigma_5min": sigma,
                 "t_remaining": t_remaining,
+                "up_ask": window.up_ask,
+                "down_ask": window.down_ask,
+                "quote_status": quote_status,
                 "window_slug": window.slug,
             }
         )
@@ -126,6 +166,12 @@ class Bot:
             return
 
         if self._window_traded:
+            return
+
+        if not quote_validation.valid:
+            self.stats["execution_status"] = "skipped"
+            if self.on_stats_update:
+                self.on_stats_update(self.stats)
             return
 
         signal = self.signal_engine.evaluate(
@@ -160,13 +206,31 @@ class Bot:
             size,
         )
 
-        result = execute_paper_trade(
-            db_path=self.db_path,
-            signal=signal,
-            entry_price=entry_price,
-            size=size,
-            window_slug=window.slug,
-        )
+        if TRADING_MODE == "paper":
+            result = execute_paper_trade(
+                db_path=self.db_path,
+                signal=signal,
+                entry_price=entry_price,
+                size=size,
+                window_slug=window.slug,
+            )
+        else:
+            if self.live_order_client is None:
+                raise RuntimeError("live_order_client is required for live trading mode")
+            result = execute_live_trade(
+                db_path=self.db_path,
+                signal=signal,
+                entry_price=entry_price,
+                size=size,
+                window_slug=window.slug,
+                client=self.live_order_client,
+            )
+        if not result.success and result.error == "window-already-consumed":
+            self._window_traded = True
+            self.stats["execution_status"] = "consumed"
+            if self.on_stats_update:
+                self.on_stats_update(self.stats)
+            return
         if result.success:
             self._window_traded = True
             self._open_trade = {
@@ -176,8 +240,11 @@ class Bot:
                 "size": size,
             }
             self.stats["position"] = f"{size:.1f} {signal.side.upper()} @ ${entry_price:.3f}"
+            self.stats["execution_status"] = "open"
             if self.on_trade:
                 self.on_trade(result, signal, window.slug)
+            if self.on_stats_update:
+                self.on_stats_update(self.stats)
 
     async def _settle_trade(self, outcome: str) -> None:
         if not self._open_trade:
