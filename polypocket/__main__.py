@@ -33,6 +33,12 @@ def main() -> None:
         app = PolypocketApp()
         app.run()
         return
+    if command == "backtest":
+        from polypocket.backtester import run_backtest_cli
+
+        days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
+        asyncio.run(run_backtest_cli(days))
+        return
 
     print(f"Unknown command: {command}")
     print("Usage: python -m polypocket observe [duration_minutes]")
