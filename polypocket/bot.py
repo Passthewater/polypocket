@@ -295,12 +295,13 @@ class Bot:
                 self._window_skip_reason = "no-edge"
             return
 
-        ok, reason = self.risk.check()
-        if not ok:
-            log.warning("Risk blocked: %s", reason)
-            if self._window_skip_reason is None:
-                self._window_skip_reason = "risk-blocked"
-            return
+        if TRADING_MODE != "paper":
+            ok, reason = self.risk.check()
+            if not ok:
+                log.warning("Risk blocked: %s", reason)
+                if self._window_skip_reason is None:
+                    self._window_skip_reason = "risk-blocked"
+                return
 
         entry_price = window.up_ask if signal.side == "up" else window.down_ask
         if entry_price is None:
