@@ -147,6 +147,8 @@ async def run_observer(duration_minutes: int = 60) -> None:
 
         if current_window is None or current_window.condition_id != window.condition_id:
             current_window = window
+            if window.price_to_beat is None:
+                window.price_to_beat = binance.latest_price
             log.info(
                 "New window: %s, priceToBeat: %.6f (Binance: %.2f)",
                 window.slug,

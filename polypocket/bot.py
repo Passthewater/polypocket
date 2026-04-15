@@ -62,12 +62,22 @@ class Bot:
             self._current_window = window
             self._window_traded = False
             self._open_trade = None
-            log.info(
-                "New window: %s priceToBeat=%.6f (Binance=%.2f)",
-                window.slug,
-                window.price_to_beat,
-                self.binance.latest_price,
-            )
+
+            # If priceToBeat missing (Chainlink delay), use Binance price as anchor
+            if window.price_to_beat is None:
+                window.price_to_beat = self.binance.latest_price
+                log.info(
+                    "New window: %s priceToBeat=PENDING, using Binance anchor=%.2f",
+                    window.slug,
+                    window.price_to_beat,
+                )
+            else:
+                log.info(
+                    "New window: %s priceToBeat=%.6f (Binance=%.2f)",
+                    window.slug,
+                    window.price_to_beat,
+                    self.binance.latest_price,
+                )
 
         displacement = (self.binance.latest_price - window.price_to_beat) / window.price_to_beat
         sigma = compute_realized_vol(self.binance.get_5min_returns(), VOLATILITY_LOOKBACK)
@@ -186,11 +196,17 @@ class Bot:
 
         async def poll_and_stream():
             while not self.stop.is_set():
-                windows = await fetch_active_windows()
+                try:
+                    windows = await fetch_active_windows()
+                except Exception as exc:
+                    log.error("Failed to fetch windows: %s", exc)
+                    windows = []
                 if windows:
                     log.info("Tracking %d active windows", len(windows))
                     await subscribe_and_stream(windows, self._on_book_update, self.stop)
-                await asyncio.sleep(30)
+                else:
+                    log.warning("No active 5-min BTC windows found, retrying in 10s...")
+                await asyncio.sleep(10)
 
         try:
             await asyncio.gather(

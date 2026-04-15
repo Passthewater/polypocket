@@ -129,6 +129,7 @@ class PolypocketApp(App):
         super().__init__()
         self.bot = Bot()
         self._session_start_time = datetime.now()
+        self._bot_ready = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -164,19 +165,30 @@ class PolypocketApp(App):
         logging.root.addHandler(handler)
         logging.root.setLevel(logging.INFO)
 
+        # Init DB before bot thread starts so the refresh timer can query safely
+        from polypocket.ledger import init_db
+        init_db(self.bot.db_path)
+
+        # Render panels immediately so they're not blank while waiting for data
+        self._refresh_panels()
+
         self.bot.on_stats_update = lambda stats: self.call_from_thread(self._refresh_panels)
         self._bot_thread = threading.Thread(target=self._run_bot, daemon=True)
         self._bot_thread.start()
         self.set_interval(1.0, self._refresh_panels)
 
     def _run_bot(self) -> None:
+        self._bot_ready = True
         asyncio.run(self.bot.run())
 
     def _refresh_panels(self) -> None:
-        self.query_one("#status", StatusPanel).update_stats(self.bot.stats, self.bot.db_path)
-        self.query_one("#window", WindowPanel).update_stats(self.bot.stats)
-        self.query_one("#trades", TradesPanel).update_trades(self.bot.db_path)
-        self.query_one("#stats-bar", StatsBar).update_stats(self.bot.db_path)
+        try:
+            self.query_one("#status", StatusPanel).update_stats(self.bot.stats, self.bot.db_path)
+            self.query_one("#window", WindowPanel).update_stats(self.bot.stats)
+            self.query_one("#trades", TradesPanel).update_trades(self.bot.db_path)
+            self.query_one("#stats-bar", StatsBar).update_stats(self.bot.db_path)
+        except Exception as exc:
+            log.error("Panel refresh error: %s", exc)
 
         elapsed = datetime.now() - self._session_start_time
         hours, remainder = divmod(int(elapsed.total_seconds()), 3600)

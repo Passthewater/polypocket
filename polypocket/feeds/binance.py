@@ -44,10 +44,13 @@ class BinanceFeed:
 
     async def run(self, stop_event: asyncio.Event | None = None) -> None:
         exchange = ccxtpro.binance()
+        log.info("Connecting to Binance BTC/USDT feed...")
         try:
             while stop_event is None or not stop_event.is_set():
                 try:
                     trades = await exchange.watch_trades("BTC/USDT")
+                    if self.latest_price is None and trades:
+                        log.info("Binance feed connected, first price: $%.2f", float(trades[0]["price"]))
                     for trade in trades:
                         self._on_trade(trade)
                 except Exception as exc:
