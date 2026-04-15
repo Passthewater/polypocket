@@ -1,1 +1,7 @@
 .worktrees/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+paper_trades.db
+observations.csv
