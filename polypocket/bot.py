@@ -10,11 +10,12 @@ from polypocket.executor import (
     TradeResult,
     execute_live_trade,
     execute_paper_trade,
+    settle_live_trade,
     settle_paper_trade,
 )
 from polypocket.feeds.binance import BinanceFeed
 from polypocket.feeds.polymarket import Window, fetch_active_windows, subscribe_and_stream
-from polypocket.ledger import get_open_trade_by_window_slug, init_db
+from polypocket.ledger import find_trade_by_window_slug, init_db
 from polypocket.observer import compute_model_p_up, compute_realized_vol
 from polypocket.quotes import QuoteSnapshot, validate_quote
 from polypocket.risk import RiskManager
@@ -63,6 +64,12 @@ class Bot:
         self.on_trade = None
         self.on_stats_update = None
 
+    def _format_position(self, trade: dict) -> str:
+        position = f'{trade["size"]:.1f} {trade["side"].upper()} @ ${trade["entry_price"]:.3f}'
+        if trade.get("mode") == "live" and trade.get("status") == "reserved":
+            return f"{position} (reserved)"
+        return position
+
     async def _on_book_update(self, window: Window, side: str) -> None:
         del side
         if self.binance.latest_price is None:
@@ -83,21 +90,22 @@ class Bot:
             self.stats["position"] = None
             self.stats["execution_status"] = None
 
-            open_trade = get_open_trade_by_window_slug(self.db_path, window.slug)
-            if open_trade is not None:
+            recovered_trade = find_trade_by_window_slug(self.db_path, window.slug)
+            recoverable_statuses = {"open"}
+            if TRADING_MODE == "live":
+                recoverable_statuses.add("reserved")
+            if recovered_trade is not None and recovered_trade["status"] in recoverable_statuses:
                 self._window_traded = True
                 self.stats["execution_status"] = "recovery"
-                if TRADING_MODE == "paper":
-                    self._open_trade = {
-                        "trade_id": open_trade["id"],
-                        "side": open_trade["side"],
-                        "entry_price": open_trade["entry_price"],
-                        "size": open_trade["size"],
-                    }
-                    self.stats["position"] = (
-                        f'{open_trade["size"]:.1f} {open_trade["side"].upper()}'
-                        f' @ ${open_trade["entry_price"]:.3f}'
-                    )
+                self._open_trade = {
+                    "trade_id": recovered_trade["id"],
+                    "side": recovered_trade["side"],
+                    "entry_price": recovered_trade["entry_price"],
+                    "size": recovered_trade["size"],
+                    "mode": TRADING_MODE,
+                    "status": recovered_trade["status"],
+                }
+                self.stats["position"] = self._format_position(self._open_trade)
 
             # If priceToBeat missing (Chainlink delay), use Binance price as anchor
             if window.price_to_beat is None:
@@ -240,8 +248,10 @@ class Bot:
                 "side": signal.side,
                 "entry_price": entry_price,
                 "size": size,
+                "mode": TRADING_MODE,
+                "status": "open",
             }
-            self.stats["position"] = f"{size:.1f} {signal.side.upper()} @ ${entry_price:.3f}"
+            self.stats["position"] = self._format_position(self._open_trade)
             self.stats["execution_status"] = "open"
             if self.on_trade:
                 self.on_trade(result, signal, window.slug)
@@ -253,20 +263,28 @@ class Bot:
             return
 
         trade = self._open_trade
-        pnl = settle_paper_trade(
-            self.db_path,
-            trade["trade_id"],
-            trade["entry_price"],
-            trade["size"],
-            trade["side"],
-            outcome,
-        )
-        if pnl > 0:
-            self.risk.record_win()
+        if trade.get("mode") == "live":
+            settle_live_trade(self.db_path, trade["trade_id"], outcome)
+            pnl = None
+            log.info(
+                "LIVE RESOLVED: %s -> trade %s marked settled pending reconciliation",
+                outcome.upper(),
+                trade["trade_id"],
+            )
         else:
-            self.risk.record_loss()
-
-        log.info("SETTLED: %s -> P&L $%.2f", outcome.upper(), pnl)
+            pnl = settle_paper_trade(
+                self.db_path,
+                trade["trade_id"],
+                trade["entry_price"],
+                trade["size"],
+                trade["side"],
+                outcome,
+            )
+            if pnl > 0:
+                self.risk.record_win()
+            else:
+                self.risk.record_loss()
+            log.info("SETTLED: %s -> P&L $%.2f", outcome.upper(), pnl)
         self._open_trade = None
         self.stats["position"] = None
         if self.on_trade:

@@ -164,7 +164,13 @@ def log_trade(
         return cursor.lastrowid
 
 
-def update_trade(db_path: str, trade_id: int, outcome: str, pnl: float, status: str) -> None:
+def update_trade(
+    db_path: str,
+    trade_id: int,
+    outcome: str | None,
+    pnl: float | None,
+    status: str,
+) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute(
             "UPDATE trades SET outcome = ?, pnl = ?, status = ? WHERE id = ?",

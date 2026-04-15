@@ -1,10 +1,16 @@
 import os
+import sqlite3
 import tempfile
 
 import pytest
 
 from polypocket.executor import TradeResult, execute_paper_trade, execute_live_trade
-from polypocket.ledger import get_paper_balance, find_trade_by_window_slug, init_db
+from polypocket.ledger import (
+    find_trade_by_window_slug,
+    get_paper_balance,
+    init_db,
+    log_trade as persist_trade,
+)
 from polypocket.signal import Signal
 
 
@@ -132,6 +138,45 @@ def test_duplicate_paper_trade_rejection_does_not_reduce_balance():
     os.unlink(db_path)
 
 
+def test_paper_trade_race_on_insert_returns_consumed_existing_trade(monkeypatch):
+    db_path = make_db()
+    signal = Signal(
+        side="up",
+        model_p_up=0.75,
+        market_price=0.55,
+        edge=0.20,
+        up_edge=0.20,
+        down_edge=-0.20,
+    )
+    balance_before = get_paper_balance(db_path)
+
+    def losing_race(**kwargs):
+        persist_trade(**kwargs)
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: trades.window_slug")
+
+    monkeypatch.setattr("polypocket.executor.log_trade", losing_race)
+
+    result = execute_paper_trade(
+        db_path=db_path,
+        signal=signal,
+        entry_price=0.55,
+        size=10.0,
+        window_slug="btc-5m-race",
+        outcome="up",
+    )
+
+    trade = find_trade_by_window_slug(db_path, "btc-5m-race")
+    assert result == TradeResult(
+        success=False,
+        trade_id=trade["id"],
+        pnl=None,
+        error="window-already-consumed",
+    )
+    assert trade["status"] == "settled"
+    assert get_paper_balance(db_path) == balance_before
+    os.unlink(db_path)
+
+
 class RecordingLiveOrderClient:
     def __init__(self):
         self.calls = []
@@ -238,6 +283,45 @@ def test_duplicate_live_trade_rejection_does_not_submit_again():
     assert second.error == "window-already-consumed"
     assert second.trade_id == first.trade_id
     assert len(client.calls) == 1
+    os.unlink(db_path)
+
+
+def test_live_trade_race_on_insert_returns_consumed_existing_trade(monkeypatch):
+    db_path = make_db()
+    signal = Signal(
+        side="up",
+        model_p_up=0.72,
+        market_price=0.51,
+        edge=0.21,
+        up_edge=0.21,
+        down_edge=-0.21,
+    )
+    client = RecordingLiveOrderClient()
+
+    def losing_race(**kwargs):
+        persist_trade(**kwargs)
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: trades.window_slug")
+
+    monkeypatch.setattr("polypocket.executor.log_trade", losing_race)
+
+    result = execute_live_trade(
+        db_path=db_path,
+        signal=signal,
+        entry_price=0.51,
+        size=7.0,
+        window_slug="sol-5m-race",
+        client=client,
+    )
+
+    trade = find_trade_by_window_slug(db_path, "sol-5m-race")
+    assert result == TradeResult(
+        success=False,
+        trade_id=trade["id"],
+        pnl=None,
+        error="window-already-consumed",
+    )
+    assert trade["status"] == "reserved"
+    assert client.calls == []
     os.unlink(db_path)
 
 

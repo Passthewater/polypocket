@@ -7,7 +7,7 @@ import pytest
 from polypocket.config import FEE_RATE
 from polypocket.executor import TradeResult
 from polypocket.feeds.polymarket import Window
-from polypocket.ledger import init_db, log_trade
+from polypocket.ledger import find_trade_by_window_slug, get_paper_balance, init_db, log_trade
 from polypocket.signal import Signal
 
 
@@ -255,6 +255,7 @@ async def test_bot_live_mode_open_trade_is_not_rehydrated_into_paper_settlement(
         status="open",
     )
 
+    starting_balance = get_paper_balance(str(db_path))
     monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
     settle_mock = Mock(return_value=0.0)
     monkeypatch.setattr(bot_module, "settle_paper_trade", settle_mock)
@@ -276,11 +277,77 @@ async def test_bot_live_mode_open_trade_is_not_rehydrated_into_paper_settlement(
 
     await bot._on_book_update(expired_window, "up")
 
+    trade = find_trade_by_window_slug(str(db_path), "btc-updown-5m-123")
     assert bot._window_traded is True
     assert bot._open_trade is None
     assert bot.stats["position"] is None
     assert bot.stats["execution_status"] == "recovery"
+    assert trade["status"] == "settled"
+    assert trade["outcome"] == "up"
+    assert trade["pnl"] is None
+    assert get_paper_balance(str(db_path)) == starting_balance
     settle_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bot_live_mode_recovers_reserved_trade_and_prevents_reentry(tmp_path: Path, monkeypatch):
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    trade_id = log_trade(
+        db_path=str(db_path),
+        window_slug="btc-updown-5m-456",
+        side="down",
+        entry_price=0.45,
+        size=10.0,
+        fees=0.10,
+        model_p_up=0.25,
+        market_p_up=0.55,
+        edge=0.20,
+        outcome=None,
+        pnl=None,
+        status="reserved",
+    )
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+    execute_mock = Mock(return_value=TradeResult(success=True, trade_id=999, pnl=None))
+    monkeypatch.setattr(bot_module, "execute_live_trade", execute_mock)
+
+    bot = Bot(db_path=str(db_path), live_order_client=Mock())
+    bot.binance.latest_price = 84000.0
+    bot.signal_engine.evaluate = Mock(
+        return_value=Signal(
+            side="down",
+            model_p_up=0.25,
+            market_price=0.45,
+            edge=0.20,
+            up_edge=-0.20,
+            down_edge=0.20,
+        )
+    )
+    bot.risk.check = lambda: (True, "")
+
+    active_window = Window(
+        condition_id="def456",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-456",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(active_window, "down")
+
+    assert bot._window_traded is True
+    assert bot._open_trade["trade_id"] == trade_id
+    assert bot.stats["execution_status"] == "recovery"
+    execute_mock.assert_not_called()
 
 
 @pytest.mark.asyncio

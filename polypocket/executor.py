@@ -1,6 +1,7 @@
 """Trade execution for paper mode and future live mode."""
 
 import logging
+import sqlite3
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -36,6 +37,15 @@ def _window_client_order_id(window_slug: str) -> str:
     return f"window-{window_slug}"
 
 
+def _window_consumed_result(db_path: str, window_slug: str) -> TradeResult:
+    existing_trade = find_trade_by_window_slug(db_path, window_slug)
+    return TradeResult(
+        success=False,
+        trade_id=None if existing_trade is None else existing_trade["id"],
+        error="window-already-consumed",
+    )
+
+
 def execute_paper_trade(
     db_path: str,
     signal: Signal,
@@ -47,11 +57,7 @@ def execute_paper_trade(
     """Execute a paper trade, optionally settling immediately."""
     existing_trade = find_trade_by_window_slug(db_path, window_slug)
     if existing_trade is not None:
-        return TradeResult(
-            success=False,
-            trade_id=existing_trade["id"],
-            error="window-already-consumed",
-        )
+        return _window_consumed_result(db_path, window_slug)
 
     cost = entry_price * size
     fees = cost * FEE_RATE
@@ -72,20 +78,26 @@ def execute_paper_trade(
         pnl = payout - cost - fees
         status = "settled"
 
-    trade_id = log_trade(
-        db_path=db_path,
-        window_slug=window_slug,
-        side=signal.side,
-        entry_price=entry_price,
-        size=size,
-        fees=fees,
-        model_p_up=signal.model_p_up,
-        market_p_up=signal.market_price,
-        edge=signal.edge,
-        outcome=outcome,
-        pnl=pnl,
-        status=status,
-    )
+    try:
+        trade_id = log_trade(
+            db_path=db_path,
+            window_slug=window_slug,
+            side=signal.side,
+            entry_price=entry_price,
+            size=size,
+            fees=fees,
+            model_p_up=signal.model_p_up,
+            market_p_up=signal.market_price,
+            edge=signal.edge,
+            outcome=outcome,
+            pnl=pnl,
+            status=status,
+        )
+    except sqlite3.IntegrityError:
+        consumed = _window_consumed_result(db_path, window_slug)
+        if consumed.trade_id is not None:
+            return consumed
+        raise
 
     deduct_paper_balance(db_path, cost + fees)
 
@@ -116,28 +128,30 @@ def execute_live_trade(
 ) -> TradeResult:
     existing_trade = find_trade_by_window_slug(db_path, window_slug)
     if existing_trade is not None:
-        return TradeResult(
-            success=False,
-            trade_id=existing_trade["id"],
-            error="window-already-consumed",
-        )
+        return _window_consumed_result(db_path, window_slug)
 
     client_order_id = _window_client_order_id(window_slug)
     fees = entry_price * size * FEE_RATE
-    trade_id = log_trade(
-        db_path=db_path,
-        window_slug=window_slug,
-        side=signal.side,
-        entry_price=entry_price,
-        size=size,
-        fees=fees,
-        model_p_up=signal.model_p_up,
-        market_p_up=signal.market_price,
-        edge=signal.edge,
-        outcome=None,
-        pnl=None,
-        status="reserved",
-    )
+    try:
+        trade_id = log_trade(
+            db_path=db_path,
+            window_slug=window_slug,
+            side=signal.side,
+            entry_price=entry_price,
+            size=size,
+            fees=fees,
+            model_p_up=signal.model_p_up,
+            market_p_up=signal.market_price,
+            edge=signal.edge,
+            outcome=None,
+            pnl=None,
+            status="reserved",
+        )
+    except sqlite3.IntegrityError:
+        consumed = _window_consumed_result(db_path, window_slug)
+        if consumed.trade_id is not None:
+            return consumed
+        raise
     client.submit_fok(
         side=signal.side,
         price=entry_price,
@@ -165,3 +179,8 @@ def settle_paper_trade(
     credit_paper_balance(db_path, payout)
     update_trade(db_path, trade_id, outcome=outcome, pnl=pnl, status="settled")
     return pnl
+
+
+def settle_live_trade(db_path: str, trade_id: int, outcome: str) -> None:
+    """Mark a live trade resolved locally without touching paper balances."""
+    update_trade(db_path, trade_id, outcome=outcome, pnl=None, status="settled")

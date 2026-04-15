@@ -20,6 +20,15 @@ def test_validate_quote_rejects_out_of_range_ask():
     assert result.reason == "ask-out-of-range"
 
 
+def test_validate_quote_rejects_zero_ask():
+    snapshot = QuoteSnapshot(up_ask=0.0, down_ask=0.4)
+
+    result = validate_quote(snapshot)
+
+    assert result.valid is False
+    assert result.reason == "ask-out-of-range"
+
+
 def test_validate_quote_rejects_overround():
     snapshot = QuoteSnapshot(up_ask=0.52, down_ask=0.51)
 
