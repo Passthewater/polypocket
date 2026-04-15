@@ -35,6 +35,8 @@ class Window:
     up_ask_size: float | None = None
     down_ask: float | None = None
     down_ask_size: float | None = None
+    up_book: list[dict] | None = None
+    down_book: list[dict] | None = None
 
     @property
     def start_time(self) -> float:
@@ -104,22 +106,25 @@ def parse_5min_btc_markets(markets: list[dict]) -> list[Window]:
 
 
 def parse_book_event(msg: dict) -> dict:
-    """Extract best ask price and size from a WS book event.
-
-    The WS sends asks in descending order (highest first), so the best
-    (lowest) ask is the last element.
-    """
+    """Extract best ask price, size, and top 3 levels from a WS book event."""
     asks = msg.get("asks", [])
     best_ask = None
     best_ask_size = None
+    top_asks = []
     if asks:
-        best = min(asks, key=lambda a: float(a["price"]))
+        sorted_asks = sorted(asks, key=lambda a: float(a["price"]))
+        best = sorted_asks[0]
         best_ask = float(best["price"])
         best_ask_size = float(best["size"])
+        top_asks = [
+            {"price": float(a["price"]), "size": float(a["size"])}
+            for a in sorted_asks[:3]
+        ]
     return {
         "asset_id": msg.get("asset_id"),
         "best_ask": best_ask,
         "best_ask_size": best_ask_size,
+        "top_asks": top_asks,
     }
 
 
@@ -419,9 +424,11 @@ async def subscribe_and_stream(
                         if side == "up":
                             window.up_ask = parsed["best_ask"]
                             window.up_ask_size = parsed["best_ask_size"]
+                            window.up_book = parsed["top_asks"]
                         else:
                             window.down_ask = parsed["best_ask"]
                             window.down_ask_size = parsed["best_ask_size"]
+                            window.down_book = parsed["top_asks"]
 
                         if on_book_update is not None:
                             await on_book_update(window, side)

@@ -65,3 +65,42 @@ def test_window_dataclass():
     )
     assert window.start_time == 1713099700.0
     assert window.price_to_beat == 84198.123456
+
+
+def test_parse_book_event_extracts_top_3_levels():
+    msg = {
+        "asset_id": "tok_up",
+        "asks": [
+            {"price": "0.60", "size": "50"},
+            {"price": "0.55", "size": "120"},
+            {"price": "0.57", "size": "80"},
+            {"price": "0.65", "size": "30"},
+            {"price": "0.56", "size": "90"},
+        ],
+    }
+    result = parse_book_event(msg)
+    assert result["best_ask"] == 0.55
+    assert result["best_ask_size"] == 120.0
+    assert len(result["top_asks"]) == 3
+    assert result["top_asks"][0] == {"price": 0.55, "size": 120.0}
+    assert result["top_asks"][1] == {"price": 0.56, "size": 90.0}
+    assert result["top_asks"][2] == {"price": 0.57, "size": 80.0}
+
+
+def test_parse_book_event_fewer_than_3_asks():
+    msg = {
+        "asset_id": "tok_up",
+        "asks": [
+            {"price": "0.55", "size": "120"},
+        ],
+    }
+    result = parse_book_event(msg)
+    assert len(result["top_asks"]) == 1
+    assert result["top_asks"][0] == {"price": 0.55, "size": 120.0}
+
+
+def test_parse_book_event_empty_asks():
+    msg = {"asset_id": "tok_up", "asks": []}
+    result = parse_book_event(msg)
+    assert result["top_asks"] == []
+    assert result["best_ask"] is None
