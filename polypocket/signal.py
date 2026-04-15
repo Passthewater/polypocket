@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from polypocket.config import (
     FEE_RATE,
     MIN_EDGE_THRESHOLD,
+    MIN_MODEL_CONFIDENCE,
     WINDOW_ENTRY_MIN_ELAPSED,
     WINDOW_ENTRY_MIN_REMAINING,
 )
@@ -49,7 +50,11 @@ class SignalEngine:
         up_edge = model_p_up - (up_ask * (1 + FEE_RATE))
         down_edge = (1 - model_p_up) - (down_ask * (1 + FEE_RATE))
 
-        if up_edge >= MIN_EDGE_THRESHOLD and up_edge >= down_edge:
+        # Model confidence guard: only trade when the model agrees with the direction
+        up_aligned = model_p_up >= MIN_MODEL_CONFIDENCE
+        down_aligned = model_p_up <= (1 - MIN_MODEL_CONFIDENCE)
+
+        if up_aligned and up_edge >= MIN_EDGE_THRESHOLD and up_edge >= down_edge:
             return Signal(
                 side="up",
                 model_p_up=model_p_up,
@@ -58,7 +63,7 @@ class SignalEngine:
                 up_edge=up_edge,
                 down_edge=down_edge,
             )
-        if down_edge >= MIN_EDGE_THRESHOLD:
+        if down_aligned and down_edge >= MIN_EDGE_THRESHOLD:
             return Signal(
                 side="down",
                 model_p_up=model_p_up,

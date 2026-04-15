@@ -147,3 +147,35 @@ def test_signal_engine_no_signal_with_over_one_down_ask():
         down_ask=1.01,
     )
     assert signal is None
+
+
+def test_signal_engine_no_signal_when_model_disagrees_with_direction():
+    """Model says neutral/contra -> no signal even if edge > threshold."""
+    engine = SignalEngine()
+    # Tiny positive displacement -> model_p_up ~0.50 (neutral)
+    # With cheap up_ask, edge might be positive, but model isn't confident
+    signal = engine.evaluate(
+        displacement=0.00001,
+        t_elapsed=120.0,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        up_ask=0.40,
+        down_ask=0.40,
+    )
+    assert signal is None
+
+
+def test_signal_engine_fires_when_model_strongly_aligned():
+    """Strong displacement + cheap ask + model alignment -> signal fires."""
+    engine = SignalEngine()
+    signal = engine.evaluate(
+        displacement=0.003,
+        t_elapsed=120.0,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        up_ask=0.50,
+        down_ask=0.80,
+    )
+    assert signal is not None
+    assert signal.side == "up"
+    assert signal.model_p_up >= 0.60
