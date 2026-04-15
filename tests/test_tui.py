@@ -49,10 +49,11 @@ def test_window_panel_surfaces_side_aware_preview(tmp_path: Path):
             "window_slug": "btc-updown-5m-123",
             "t_remaining": 145.0,
             "model_p_up": 0.61,
-            "market_p_up": 0.57,
+            "market_p_up": 0.11,
             "edge": 0.04,
             "preview_side": "down",
             "preview_market_price": 0.43,
+            "up_ask": 0.57,
         }
     )
 

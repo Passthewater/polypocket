@@ -64,7 +64,7 @@ class WindowPanel(Static):
         slug = stats.get("window_slug", "--")
         t_remaining = stats.get("t_remaining")
         model = stats.get("model_p_up")
-        market = stats.get("market_p_up")
+        up_ask = stats.get("up_ask")
         edge = stats.get("edge")
         preview_side = stats.get("preview_side")
         preview_market_price = stats.get("preview_market_price")
@@ -77,8 +77,8 @@ class WindowPanel(Static):
         else:
             lines.append("Time Left: --")
 
-        if model is not None and market is not None:
-            lines.append(f"Model: {model:.1%}  Up Ask: {market:.1%}")
+        if model is not None and up_ask is not None:
+            lines.append(f"Model: {model:.1%}  Up Ask: {up_ask:.1%}")
             if edge is not None:
                 indicator = " SIGNAL" if edge >= MIN_EDGE_THRESHOLD else ""
                 if preview_side is not None and preview_market_price is not None:
