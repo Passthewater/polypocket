@@ -11,7 +11,7 @@ from polypocket.config import (
 from polypocket.observer import compute_model_p_up
 
 
-@dataclass(init=False)
+@dataclass
 class Signal:
     side: str
     model_p_up: float
@@ -19,38 +19,6 @@ class Signal:
     edge: float
     up_edge: float
     down_edge: float
-
-    def __init__(
-        self,
-        *,
-        side: str,
-        model_p_up: float,
-        market_price: float | None = None,
-        market_p_up: float | None = None,
-        edge: float,
-        up_edge: float | None = None,
-        down_edge: float | None = None,
-    ) -> None:
-        if market_price is None:
-            market_price = market_p_up
-        if market_price is None:
-            raise TypeError("Signal requires market_price")
-
-        if up_edge is None:
-            up_edge = edge if side == "up" else -edge
-        if down_edge is None:
-            down_edge = edge if side == "down" else -edge
-
-        self.side = side
-        self.model_p_up = model_p_up
-        self.market_price = market_price
-        self.edge = edge
-        self.up_edge = up_edge
-        self.down_edge = down_edge
-
-    @property
-    def market_p_up(self) -> float:
-        return self.market_price
 
 
 class SignalEngine:
@@ -62,17 +30,14 @@ class SignalEngine:
         t_elapsed: float,
         t_remaining: float,
         sigma_5min: float,
-        up_ask: float | None = None,
-        down_ask: float | None = None,
-        market_p_up: float | None = None,
+        *,
+        up_ask: float | None,
+        down_ask: float | None,
     ) -> Signal | None:
         if t_elapsed < WINDOW_ENTRY_MIN_ELAPSED:
             return None
         if t_remaining < WINDOW_ENTRY_MIN_REMAINING:
             return None
-        if up_ask is None and down_ask is None and market_p_up is not None:
-            up_ask = market_p_up
-            down_ask = 1.0 - market_p_up
         if up_ask is None or down_ask is None:
             return None
         if sigma_5min <= 0:
