@@ -125,14 +125,18 @@ class Bot:
                     self.binance.latest_price,
                 )
             else:
-                # Use Binance as provisional anchor until Chainlink reports.
-                # Error is typically <0.05% — negligible for model probabilities.
-                window.price_to_beat = self.binance.latest_price
+                # Use Binance price at window start as provisional anchor
+                # until Chainlink reports.  price_at() looks up the high-res
+                # buffer; falls back to latest_price if the buffer doesn't
+                # reach back far enough (bot just started).
+                hist_price = self.binance.price_at(window.start_time)
+                window.price_to_beat = hist_price if hist_price is not None else self.binance.latest_price
                 self._ptb_provisional = True
                 log.info(
-                    "New window: %s priceToBeat=PENDING, provisional Binance=%.2f",
+                    "New window: %s priceToBeat=PENDING, provisional Binance=%.2f (%s)",
                     window.slug,
                     window.price_to_beat,
+                    "historical" if hist_price is not None else "latest",
                 )
             self._ptb_last_fetch = 0.0
 
@@ -220,15 +224,6 @@ class Bot:
             return
 
         self.stats["execution_status"] = None
-
-        # Never trade on a provisional priceToBeat — the displacement is
-        # meaningless until the real Chainlink anchor arrives.
-        if self._ptb_provisional:
-            self.stats["execution_status"] = "awaiting-ptb"
-            if self.on_stats_update:
-                self.on_stats_update(self.stats)
-            return
-
         if not quote_validation.valid:
             self.stats["execution_status"] = "skipped"
             if self.on_stats_update:
