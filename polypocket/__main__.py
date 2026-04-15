@@ -27,6 +27,12 @@ def main() -> None:
         except KeyboardInterrupt:
             pass
         return
+    if command == "tui":
+        from polypocket.tui import PolypocketApp
+
+        app = PolypocketApp()
+        app.run()
+        return
 
     print(f"Unknown command: {command}")
     print("Usage: python -m polypocket observe [duration_minutes]")
