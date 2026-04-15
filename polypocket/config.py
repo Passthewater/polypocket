@@ -8,7 +8,7 @@ load_dotenv()
 
 # --- Signal thresholds ---
 MIN_EDGE_THRESHOLD = 0.03
-FEE_RATE = 0.02
+FEE_RATE = 0.072
 
 # --- Position sizing ---
 POSITION_SIZE_USDC = 10.0

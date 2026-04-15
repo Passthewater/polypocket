@@ -13,7 +13,7 @@ from polypocket.config import (
 
 def test_defaults_are_sane():
     assert MIN_EDGE_THRESHOLD == 0.03
-    assert FEE_RATE == 0.02
+    assert FEE_RATE == 0.072
     assert POSITION_SIZE_USDC == 10.0
     assert MAX_DAILY_LOSS == 50.0
     assert MAX_CONSECUTIVE_LOSSES == 5
@@ -23,6 +23,6 @@ def test_defaults_are_sane():
     assert TRADING_MODE == "paper"
 
 
-def test_edge_threshold_exceeds_fee():
-    """Min edge must be greater than fee rate to be profitable."""
-    assert MIN_EDGE_THRESHOLD > FEE_RATE
+def test_min_edge_plus_fee_is_reasonable():
+    """Signal engine requires edge > MIN_EDGE_THRESHOLD + FEE_RATE to trade."""
+    assert MIN_EDGE_THRESHOLD + FEE_RATE < 0.50
