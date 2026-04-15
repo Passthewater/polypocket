@@ -173,6 +173,12 @@ def update_trade(db_path: str, trade_id: int, outcome: str, pnl: float, status: 
         conn.commit()
 
 
+def update_trade_status(db_path: str, trade_id: int, status: str) -> None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("UPDATE trades SET status = ? WHERE id = ?", (status, trade_id))
+        conn.commit()
+
+
 def get_recent_trades(db_path: str, limit: int = 20) -> list[dict]:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row

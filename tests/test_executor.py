@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import tempfile
 
 import pytest
@@ -141,7 +140,15 @@ class RecordingLiveOrderClient:
                 "client_order_id": client_order_id,
             }
         )
-        return "live-order-123"
+
+
+class FailingLiveOrderClient:
+    def __init__(self):
+        self.calls = 0
+
+    def submit_fok(self, side, price, size, client_order_id):
+        self.calls += 1
+        raise RuntimeError("broker unavailable")
 
 
 def test_live_trade_uses_deterministic_client_order_id():
@@ -175,4 +182,80 @@ def test_live_trade_uses_deterministic_client_order_id():
         }
     ]
     assert result.trade_id == find_trade_by_window_slug(db_path, "eth-5m-999")["id"]
+    assert find_trade_by_window_slug(db_path, "eth-5m-999")["status"] == "open"
+    os.unlink(db_path)
+
+
+def test_duplicate_live_trade_rejection_does_not_submit_again():
+    db_path = make_db()
+    signal = Signal(
+        side="up",
+        model_p_up=0.72,
+        market_price=0.51,
+        edge=0.21,
+        up_edge=0.21,
+        down_edge=-0.21,
+    )
+    client = RecordingLiveOrderClient()
+
+    first = execute_live_trade(
+        db_path=db_path,
+        signal=signal,
+        entry_price=0.51,
+        size=7.0,
+        window_slug="sol-5m-dup",
+        client=client,
+    )
+    assert first.success is True
+    assert client.calls == [
+        {
+            "side": "up",
+            "price": 0.51,
+            "size": 7.0,
+            "client_order_id": "window-sol-5m-dup",
+        }
+    ]
+
+    second = execute_live_trade(
+        db_path=db_path,
+        signal=signal,
+        entry_price=0.51,
+        size=7.0,
+        window_slug="sol-5m-dup",
+        client=client,
+    )
+
+    assert second.success is False
+    assert second.error == "window-already-consumed"
+    assert second.trade_id == first.trade_id
+    assert len(client.calls) == 1
+    os.unlink(db_path)
+
+
+def test_live_trade_failure_keeps_reserved_trade_reconcilable():
+    db_path = make_db()
+    signal = Signal(
+        side="down",
+        model_p_up=0.32,
+        market_price=0.44,
+        edge=0.12,
+        up_edge=-0.12,
+        down_edge=0.12,
+    )
+    client = FailingLiveOrderClient()
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        execute_live_trade(
+            db_path=db_path,
+            signal=signal,
+            entry_price=0.44,
+            size=4.0,
+            window_slug="arb-5m-fail",
+            client=client,
+        )
+
+    trade = find_trade_by_window_slug(db_path, "arb-5m-fail")
+    assert trade is not None
+    assert trade["status"] == "reserved"
+    assert client.calls == 1
     os.unlink(db_path)

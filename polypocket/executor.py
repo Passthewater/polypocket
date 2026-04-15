@@ -12,6 +12,7 @@ from polypocket.ledger import (
     find_trade_by_window_slug,
     log_trade,
     update_trade,
+    update_trade_status,
 )
 from polypocket.signal import Signal
 
@@ -27,7 +28,7 @@ class TradeResult:
 
 
 class LiveOrderClient(Protocol):
-    def submit_fok(self, side: str, price: float, size: float, client_order_id: str) -> str:
+    def submit_fok(self, side: str, price: float, size: float, client_order_id: str) -> None:
         ...
 
 
@@ -122,13 +123,6 @@ def execute_live_trade(
         )
 
     client_order_id = _window_client_order_id(window_slug)
-    client.submit_fok(
-        side=signal.side,
-        price=entry_price,
-        size=size,
-        client_order_id=client_order_id,
-    )
-
     fees = entry_price * size * FEE_RATE
     trade_id = log_trade(
         db_path=db_path,
@@ -142,8 +136,15 @@ def execute_live_trade(
         edge=signal.edge,
         outcome=None,
         pnl=None,
-        status="open",
+        status="reserved",
     )
+    client.submit_fok(
+        side=signal.side,
+        price=entry_price,
+        size=size,
+        client_order_id=client_order_id,
+    )
+    update_trade_status(db_path, trade_id, "open")
     return TradeResult(success=True, trade_id=trade_id, pnl=None)
 
 
