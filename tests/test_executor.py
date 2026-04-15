@@ -15,7 +15,14 @@ def make_db():
 
 def test_paper_trade_up_win():
     db_path = make_db()
-    signal = Signal(side="up", model_p_up=0.75, market_p_up=0.55, edge=0.20)
+    signal = Signal(
+        side="up",
+        model_p_up=0.75,
+        market_price=0.55,
+        edge=0.20,
+        up_edge=0.20,
+        down_edge=-0.20,
+    )
     result = execute_paper_trade(
         db_path=db_path,
         signal=signal,
@@ -33,7 +40,14 @@ def test_paper_trade_up_win():
 
 def test_paper_trade_up_loss():
     db_path = make_db()
-    signal = Signal(side="up", model_p_up=0.75, market_p_up=0.55, edge=0.20)
+    signal = Signal(
+        side="up",
+        model_p_up=0.75,
+        market_price=0.55,
+        edge=0.20,
+        up_edge=0.20,
+        down_edge=-0.20,
+    )
     result = execute_paper_trade(
         db_path=db_path,
         signal=signal,
@@ -51,7 +65,14 @@ def test_paper_trade_up_loss():
 
 def test_paper_trade_insufficient_balance():
     db_path = make_db()
-    signal = Signal(side="up", model_p_up=0.75, market_p_up=0.55, edge=0.20)
+    signal = Signal(
+        side="up",
+        model_p_up=0.75,
+        market_price=0.55,
+        edge=0.20,
+        up_edge=0.20,
+        down_edge=-0.20,
+    )
     result = execute_paper_trade(
         db_path=db_path,
         signal=signal,

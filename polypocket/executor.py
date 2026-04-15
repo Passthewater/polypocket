@@ -62,7 +62,7 @@ def execute_paper_trade(
         size=size,
         fees=fees,
         model_p_up=signal.model_p_up,
-        market_p_up=signal.market_p_up,
+        market_p_up=signal.market_price,
         edge=signal.edge,
         outcome=outcome,
         pnl=pnl,

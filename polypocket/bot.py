@@ -115,7 +115,8 @@ class Bot:
             t_elapsed=t_elapsed,
             t_remaining=t_remaining,
             sigma_5min=sigma,
-            market_p_up=window.up_ask,
+            up_ask=window.up_ask,
+            down_ask=window.down_ask,
         )
         if signal is None:
             return
@@ -135,7 +136,7 @@ class Bot:
             signal.side.upper(),
             signal.edge * 100,
             signal.model_p_up * 100,
-            signal.market_p_up * 100,
+            signal.market_price * 100,
             signal.side,
             entry_price,
             size,

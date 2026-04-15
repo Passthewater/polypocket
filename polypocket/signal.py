@@ -40,6 +40,8 @@ class SignalEngine:
             return None
         if up_ask is None or down_ask is None:
             return None
+        if not (0 < up_ask <= 1) or not (0 < down_ask <= 1):
+            return None
         if sigma_5min <= 0:
             return None
 

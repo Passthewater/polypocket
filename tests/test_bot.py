@@ -51,8 +51,10 @@ async def test_bot_executes_once_per_window(tmp_path: Path, monkeypatch):
     bot.signal_engine.evaluate = lambda **kwargs: Signal(
         side="up",
         model_p_up=0.75,
-        market_p_up=0.55,
+        market_price=0.55,
         edge=0.20,
+        up_edge=0.20,
+        down_edge=-0.20,
     )
     bot.risk.check = lambda: (True, "")
 
