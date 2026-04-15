@@ -8,34 +8,120 @@ from polypocket.config import PAPER_STARTING_BALANCE
 
 def init_db(db_path: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
-        conn.executescript(
-            f"""
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                window_slug TEXT NOT NULL,
-                side TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                size REAL NOT NULL,
-                fees REAL NOT NULL,
-                model_p_up REAL,
-                market_p_up REAL,
-                edge REAL,
-                outcome TEXT,
-                pnl REAL,
-                status TEXT NOT NULL DEFAULT 'open'
-            );
+        try:
+            conn.execute("BEGIN")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    window_slug TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    size REAL NOT NULL,
+                    fees REAL NOT NULL,
+                    model_p_up REAL,
+                    market_p_up REAL,
+                    edge REAL,
+                    outcome TEXT,
+                    pnl REAL,
+                    status TEXT NOT NULL DEFAULT 'open'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_account (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    cash_balance REAL NOT NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO paper_account (id, cash_balance)
+                VALUES (1, ?)
+                """,
+                (PAPER_STARTING_BALANCE,),
+            )
 
-            CREATE TABLE IF NOT EXISTS paper_account (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                cash_balance REAL NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
+            duplicates = conn.execute(
+                """
+                SELECT window_slug
+                FROM trades
+                GROUP BY window_slug
+                HAVING COUNT(*) > 1
+                ORDER BY window_slug
+                """
+            ).fetchall()
+            if duplicates:
+                slugs = ", ".join(row[0] for row in duplicates)
+                raise RuntimeError(f"Duplicate window_slug values exist: {slugs}")
 
-            INSERT OR IGNORE INTO paper_account (id, cash_balance)
-            VALUES (1, {PAPER_STARTING_BALANCE});
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)"
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_window_slug
+                ON trades(window_slug)
+                """
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def find_duplicate_window_slugs(db_path: str) -> list[str]:
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute(
             """
-        )
+            SELECT window_slug
+            FROM trades
+            GROUP BY window_slug
+            HAVING COUNT(*) > 1
+            ORDER BY window_slug
+            """
+        ).fetchall()
+        return [row[0] for row in rows]
+
+
+def find_trade_by_window_slug(db_path: str, window_slug: str) -> dict | None:
+    """Return the most recent trade for a window slug, if one exists."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT *
+            FROM trades
+            WHERE window_slug = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (window_slug,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_open_trade_by_window_slug(db_path: str, window_slug: str) -> dict | None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT *
+            FROM trades
+            WHERE window_slug = ? AND status = 'open'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (window_slug,),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def log_trade(
@@ -78,12 +164,24 @@ def log_trade(
         return cursor.lastrowid
 
 
-def update_trade(db_path: str, trade_id: int, outcome: str, pnl: float, status: str) -> None:
+def update_trade(
+    db_path: str,
+    trade_id: int,
+    outcome: str | None,
+    pnl: float | None,
+    status: str,
+) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute(
             "UPDATE trades SET outcome = ?, pnl = ?, status = ? WHERE id = ?",
             (outcome, pnl, status, trade_id),
         )
+        conn.commit()
+
+
+def update_trade_status(db_path: str, trade_id: int, status: str) -> None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("UPDATE trades SET status = ? WHERE id = ?", (status, trade_id))
         conn.commit()
 
 

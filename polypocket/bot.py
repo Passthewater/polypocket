@@ -4,12 +4,20 @@ import asyncio
 import logging
 import time
 
-from polypocket.config import PAPER_DB_PATH, POSITION_SIZE_USDC, TRADING_MODE, VOLATILITY_LOOKBACK
-from polypocket.executor import TradeResult, execute_paper_trade, settle_paper_trade
+from polypocket.config import FEE_RATE, PAPER_DB_PATH, POSITION_SIZE_USDC, TRADING_MODE, VOLATILITY_LOOKBACK
+from polypocket.executor import (
+    LiveOrderClient,
+    TradeResult,
+    execute_live_trade,
+    execute_paper_trade,
+    settle_live_trade,
+    settle_paper_trade,
+)
 from polypocket.feeds.binance import BinanceFeed
 from polypocket.feeds.polymarket import Window, fetch_active_windows, subscribe_and_stream
-from polypocket.ledger import init_db
+from polypocket.ledger import find_trade_by_window_slug, init_db
 from polypocket.observer import compute_model_p_up, compute_realized_vol
+from polypocket.quotes import QuoteSnapshot, validate_quote
 from polypocket.risk import RiskManager
 from polypocket.signal import SignalEngine
 
@@ -17,8 +25,13 @@ log = logging.getLogger(__name__)
 
 
 class Bot:
-    def __init__(self, db_path: str = PAPER_DB_PATH):
+    def __init__(
+        self,
+        db_path: str = PAPER_DB_PATH,
+        live_order_client: LiveOrderClient | None = None,
+    ):
         self.db_path = db_path
+        self.live_order_client = live_order_client
         self.binance = BinanceFeed()
         self.signal_engine = SignalEngine()
         self.risk = RiskManager(db_path=db_path)
@@ -36,14 +49,26 @@ class Bot:
             "model_p_up": None,
             "market_p_up": None,
             "edge": None,
+            "preview_side": None,
+            "preview_market_price": None,
             "sigma_5min": None,
             "t_remaining": None,
+            "up_ask": None,
+            "down_ask": None,
+            "quote_status": None,
+            "execution_status": None,
             "window_slug": None,
             "position": None,
         }
 
         self.on_trade = None
         self.on_stats_update = None
+
+    def _format_position(self, trade: dict) -> str:
+        position = f'{trade["size"]:.1f} {trade["side"].upper()} @ ${trade["entry_price"]:.3f}'
+        if trade.get("mode") == "live" and trade.get("status") == "reserved":
+            return f"{position} (reserved)"
+        return position
 
     async def _on_book_update(self, window: Window, side: str) -> None:
         del side
@@ -62,6 +87,25 @@ class Bot:
             self._current_window = window
             self._window_traded = False
             self._open_trade = None
+            self.stats["position"] = None
+            self.stats["execution_status"] = None
+
+            recovered_trade = find_trade_by_window_slug(self.db_path, window.slug)
+            recoverable_statuses = {"open"}
+            if TRADING_MODE == "live":
+                recoverable_statuses.add("reserved")
+            if recovered_trade is not None and recovered_trade["status"] in recoverable_statuses:
+                self._window_traded = True
+                self.stats["execution_status"] = "recovery"
+                self._open_trade = {
+                    "trade_id": recovered_trade["id"],
+                    "side": recovered_trade["side"],
+                    "entry_price": recovered_trade["entry_price"],
+                    "size": recovered_trade["size"],
+                    "mode": TRADING_MODE,
+                    "status": recovered_trade["status"],
+                }
+                self.stats["position"] = self._format_position(self._open_trade)
 
             # If priceToBeat missing (Chainlink delay), use Binance price as anchor
             if window.price_to_beat is None:
@@ -85,6 +129,24 @@ class Bot:
             sigma = 0.001
 
         model_p_up = compute_model_p_up(displacement, max(t_remaining, 0), sigma)
+        up_edge = None if window.up_ask is None else model_p_up - (window.up_ask * (1 + FEE_RATE))
+        down_edge = None if window.down_ask is None else (1 - model_p_up) - (window.down_ask * (1 + FEE_RATE))
+        preview_edge = None
+        preview_side = None
+        preview_market_price = None
+        if up_edge is not None or down_edge is not None:
+            if up_edge is not None and (down_edge is None or up_edge >= down_edge):
+                preview_edge = up_edge
+                preview_side = "up"
+                preview_market_price = window.up_ask
+            elif down_edge is not None:
+                preview_edge = down_edge
+                preview_side = "down"
+                preview_market_price = window.down_ask
+        quote_validation = validate_quote(
+            QuoteSnapshot(up_ask=window.up_ask, down_ask=window.down_ask)
+        )
+        quote_status = quote_validation.reason if not quote_validation.valid else "valid"
         self.stats.update(
             {
                 "btc_price": self.binance.latest_price,
@@ -92,9 +154,14 @@ class Bot:
                 "displacement": displacement,
                 "model_p_up": model_p_up,
                 "market_p_up": window.up_ask,
-                "edge": (model_p_up - window.up_ask) if window.up_ask is not None else None,
+                "edge": preview_edge,
+                "preview_side": preview_side,
+                "preview_market_price": preview_market_price,
                 "sigma_5min": sigma,
                 "t_remaining": t_remaining,
+                "up_ask": window.up_ask,
+                "down_ask": window.down_ask,
+                "quote_status": quote_status,
                 "window_slug": window.slug,
             }
         )
@@ -110,12 +177,20 @@ class Bot:
         if self._window_traded:
             return
 
+        self.stats["execution_status"] = None
+        if not quote_validation.valid:
+            self.stats["execution_status"] = "skipped"
+            if self.on_stats_update:
+                self.on_stats_update(self.stats)
+            return
+
         signal = self.signal_engine.evaluate(
             displacement=displacement,
             t_elapsed=t_elapsed,
             t_remaining=t_remaining,
             sigma_5min=sigma,
-            market_p_up=window.up_ask,
+            up_ask=window.up_ask,
+            down_ask=window.down_ask,
         )
         if signal is None:
             return
@@ -135,19 +210,37 @@ class Bot:
             signal.side.upper(),
             signal.edge * 100,
             signal.model_p_up * 100,
-            signal.market_p_up * 100,
+            signal.market_price * 100,
             signal.side,
             entry_price,
             size,
         )
 
-        result = execute_paper_trade(
-            db_path=self.db_path,
-            signal=signal,
-            entry_price=entry_price,
-            size=size,
-            window_slug=window.slug,
-        )
+        if TRADING_MODE == "paper":
+            result = execute_paper_trade(
+                db_path=self.db_path,
+                signal=signal,
+                entry_price=entry_price,
+                size=size,
+                window_slug=window.slug,
+            )
+        else:
+            if self.live_order_client is None:
+                raise RuntimeError("live_order_client is required for live trading mode")
+            result = execute_live_trade(
+                db_path=self.db_path,
+                signal=signal,
+                entry_price=entry_price,
+                size=size,
+                window_slug=window.slug,
+                client=self.live_order_client,
+            )
+        if not result.success and result.error == "window-already-consumed":
+            self._window_traded = True
+            self.stats["execution_status"] = "consumed"
+            if self.on_stats_update:
+                self.on_stats_update(self.stats)
+            return
         if result.success:
             self._window_traded = True
             self._open_trade = {
@@ -155,30 +248,43 @@ class Bot:
                 "side": signal.side,
                 "entry_price": entry_price,
                 "size": size,
+                "mode": TRADING_MODE,
+                "status": "open",
             }
-            self.stats["position"] = f"{size:.1f} {signal.side.upper()} @ ${entry_price:.3f}"
+            self.stats["position"] = self._format_position(self._open_trade)
+            self.stats["execution_status"] = "open"
             if self.on_trade:
                 self.on_trade(result, signal, window.slug)
+            if self.on_stats_update:
+                self.on_stats_update(self.stats)
 
     async def _settle_trade(self, outcome: str) -> None:
         if not self._open_trade:
             return
 
         trade = self._open_trade
-        pnl = settle_paper_trade(
-            self.db_path,
-            trade["trade_id"],
-            trade["entry_price"],
-            trade["size"],
-            trade["side"],
-            outcome,
-        )
-        if pnl > 0:
-            self.risk.record_win()
+        if trade.get("mode") == "live":
+            settle_live_trade(self.db_path, trade["trade_id"], outcome)
+            pnl = None
+            log.info(
+                "LIVE RESOLVED: %s -> trade %s marked settled pending reconciliation",
+                outcome.upper(),
+                trade["trade_id"],
+            )
         else:
-            self.risk.record_loss()
-
-        log.info("SETTLED: %s -> P&L $%.2f", outcome.upper(), pnl)
+            pnl = settle_paper_trade(
+                self.db_path,
+                trade["trade_id"],
+                trade["entry_price"],
+                trade["size"],
+                trade["side"],
+                outcome,
+            )
+            if pnl > 0:
+                self.risk.record_win()
+            else:
+                self.risk.record_loss()
+            log.info("SETTLED: %s -> P&L $%.2f", outcome.upper(), pnl)
         self._open_trade = None
         self.stats["position"] = None
         if self.on_trade:

@@ -5,9 +5,10 @@ Polymarket's `priceToBeat` because historical event metadata is not readily
 available in bulk.
 
 WARNING: without historical Polymarket ask prices, the backtest assumes a
-fixed `market_p_up` (default 0.50). Live trading uses real order book asks
-which already partially reflect the move. Backtest results will overstate
-edge vs. live — use paper trading for realistic performance estimates.
+fixed midpoint market price (default 0.50) and converts it into synthetic
+up/down asks. Live trading uses real order book asks which already partially
+reflect the move. Backtest results will overstate edge vs. live - use paper
+trading for realistic performance estimates.
 """
 
 import logging
@@ -74,7 +75,8 @@ def simulate_window(
             t_elapsed=t_elapsed,
             t_remaining=t_remaining,
             sigma_5min=sigma_5min,
-            market_p_up=market_p_up,
+            up_ask=market_p_up,
+            down_ask=1.0 - market_p_up,
         )
 
         if signal is not None and signal_result is None:

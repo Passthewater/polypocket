@@ -1,13 +1,19 @@
 import os
+import sqlite3
 import tempfile
+
+import pytest
 
 from polypocket.ledger import (
     credit_paper_balance,
     deduct_paper_balance,
     get_daily_pnl,
+    get_open_trade_by_window_slug,
     get_paper_balance,
     get_recent_trades,
     get_session_stats,
+    find_duplicate_window_slugs,
+    find_trade_by_window_slug,
     init_db,
     log_trade,
 )
@@ -47,6 +53,148 @@ def test_log_and_retrieve_trade():
     assert trades[0]["side"] == "up"
     assert trades[0]["entry_price"] == 0.575
     os.unlink(db_path)
+
+
+def test_find_trade_by_window_slug_returns_existing_trade_row():
+    db_path = make_db()
+    log_trade(
+        db_path,
+        "btc-5m-123",
+        "up",
+        0.575,
+        10.0,
+        0.115,
+        0.72,
+        0.575,
+        0.145,
+        None,
+        None,
+        "open",
+    )
+
+    trade = find_trade_by_window_slug(db_path, "btc-5m-123")
+
+    assert trade is not None
+    assert trade["window_slug"] == "btc-5m-123"
+    assert trade["status"] == "open"
+    os.unlink(db_path)
+
+
+def test_get_open_trade_by_window_slug_returns_none_for_settled_trade():
+    db_path = make_db()
+    log_trade(db_path, "w1", "up", 0.55, 10, 0.11, 0.7, 0.55, 0.15, "up", 3.4, "settled")
+
+    trade = get_open_trade_by_window_slug(db_path, "w1")
+
+    assert trade is None
+    os.unlink(db_path)
+
+
+def test_find_duplicate_window_slugs_reports_legacy_duplicates():
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            window_slug TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            size REAL NOT NULL,
+            fees REAL NOT NULL,
+            model_p_up REAL,
+            market_p_up REAL,
+            edge REAL,
+            outcome TEXT,
+            pnl REAL,
+            status TEXT NOT NULL DEFAULT 'open'
+        );
+
+        INSERT INTO trades (window_slug, side, entry_price, size, fees, status)
+        VALUES ('dup-slug', 'up', 1.0, 1.0, 0.01, 'open');
+
+        INSERT INTO trades (window_slug, side, entry_price, size, fees, status)
+        VALUES ('dup-slug', 'down', 1.1, 1.0, 0.01, 'settled');
+
+        INSERT INTO trades (window_slug, side, entry_price, size, fees, status)
+        VALUES ('unique-slug', 'up', 1.2, 1.0, 0.01, 'open');
+        """
+    )
+    conn.close()
+
+    duplicates = find_duplicate_window_slugs(db_path)
+
+    assert duplicates == ["dup-slug"]
+    os.unlink(db_path)
+
+
+def test_init_db_rejects_legacy_duplicate_window_slugs():
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            window_slug TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            size REAL NOT NULL,
+            fees REAL NOT NULL,
+            model_p_up REAL,
+            market_p_up REAL,
+            edge REAL,
+            outcome TEXT,
+            pnl REAL,
+            status TEXT NOT NULL DEFAULT 'open'
+        );
+
+        INSERT INTO trades (window_slug, side, entry_price, size, fees, status)
+        VALUES ('dup-slug', 'up', 1.0, 1.0, 0.01, 'open');
+
+        INSERT INTO trades (window_slug, side, entry_price, size, fees, status)
+        VALUES ('dup-slug', 'down', 1.1, 1.0, 0.01, 'settled');
+        """
+    )
+    conn.close()
+
+    try:
+        with pytest.raises(RuntimeError, match="Duplicate window_slug values exist"):
+            init_db(db_path)
+    finally:
+        check = sqlite3.connect(db_path)
+        tables = {
+            row[0]
+            for row in check.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        indexes = {
+            row[0]
+            for row in check.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        check.close()
+        assert "paper_account" not in tables
+        assert "idx_trades_window_slug" not in indexes
+        assert "idx_trades_timestamp" not in indexes
+        assert "idx_trades_status" not in indexes
+        os.unlink(db_path)
+
+
+def test_init_db_enforces_unique_window_slug():
+    db_path = make_db()
+    log_trade(db_path, "unique-slug", "up", 0.55, 10, 0.11, 0.7, 0.55, 0.15, None, None, "open")
+
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            log_trade(db_path, "unique-slug", "down", 0.60, 10, 0.12, 0.6, 0.60, 0.0, None, None, "open")
+    finally:
+        os.unlink(db_path)
 
 
 def test_daily_pnl():

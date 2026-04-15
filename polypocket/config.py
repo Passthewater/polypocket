@@ -35,3 +35,4 @@ PAPER_DB_PATH = "paper_trades.db"
 POLYMARKET_HOST = "https://clob.polymarket.com"
 POLYMARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CHAIN_ID = 137
+BOOK_MAX_TOTAL_ASK = 1.02
