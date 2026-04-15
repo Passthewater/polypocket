@@ -165,6 +165,24 @@ def test_init_db_rejects_legacy_duplicate_window_slugs():
         with pytest.raises(RuntimeError, match="Duplicate window_slug values exist"):
             init_db(db_path)
     finally:
+        check = sqlite3.connect(db_path)
+        tables = {
+            row[0]
+            for row in check.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        indexes = {
+            row[0]
+            for row in check.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        check.close()
+        assert "paper_account" not in tables
+        assert "idx_trades_window_slug" not in indexes
+        assert "idx_trades_timestamp" not in indexes
+        assert "idx_trades_status" not in indexes
         os.unlink(db_path)
 
 

@@ -8,55 +8,73 @@ from polypocket.config import PAPER_STARTING_BALANCE
 
 def init_db(db_path: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
-        conn.executescript(
-            f"""
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                window_slug TEXT NOT NULL,
-                side TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                size REAL NOT NULL,
-                fees REAL NOT NULL,
-                model_p_up REAL,
-                market_p_up REAL,
-                edge REAL,
-                outcome TEXT,
-                pnl REAL,
-                status TEXT NOT NULL DEFAULT 'open'
-            );
+        try:
+            conn.execute("BEGIN")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    window_slug TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    size REAL NOT NULL,
+                    fees REAL NOT NULL,
+                    model_p_up REAL,
+                    market_p_up REAL,
+                    edge REAL,
+                    outcome TEXT,
+                    pnl REAL,
+                    status TEXT NOT NULL DEFAULT 'open'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_account (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    cash_balance REAL NOT NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO paper_account (id, cash_balance)
+                VALUES (1, ?)
+                """,
+                (PAPER_STARTING_BALANCE,),
+            )
 
-            CREATE TABLE IF NOT EXISTS paper_account (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                cash_balance REAL NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
+            duplicates = conn.execute(
+                """
+                SELECT window_slug
+                FROM trades
+                GROUP BY window_slug
+                HAVING COUNT(*) > 1
+                ORDER BY window_slug
+                """
+            ).fetchall()
+            if duplicates:
+                slugs = ", ".join(row[0] for row in duplicates)
+                raise RuntimeError(f"Duplicate window_slug values exist: {slugs}")
 
-            INSERT OR IGNORE INTO paper_account (id, cash_balance)
-            VALUES (1, {PAPER_STARTING_BALANCE});
-            """
-        )
-        duplicates = conn.execute(
-            """
-            SELECT window_slug
-            FROM trades
-            GROUP BY window_slug
-            HAVING COUNT(*) > 1
-            ORDER BY window_slug
-            """
-        ).fetchall()
-        if duplicates:
-            slugs = ", ".join(row[0] for row in duplicates)
-            raise RuntimeError(f"Duplicate window_slug values exist: {slugs}")
-
-        conn.executescript(
-            """
-            CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC);
-            CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_window_slug
-                ON trades(window_slug);
-            """
-        )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)"
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_window_slug
+                ON trades(window_slug)
+                """
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def find_duplicate_window_slugs(db_path: str) -> list[str]:

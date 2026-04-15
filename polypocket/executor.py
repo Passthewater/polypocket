@@ -43,15 +43,13 @@ def execute_paper_trade(
             error=f"Insufficient balance: need ${cost + fees:.2f}, have ${balance:.2f}",
         )
 
-    deduct_paper_balance(db_path, cost + fees)
-
     pnl = None
     status = "open"
+    payout = 0.0
     if outcome is not None:
         won = signal.side == outcome
         payout = size if won else 0.0
         pnl = payout - cost - fees
-        credit_paper_balance(db_path, payout)
         status = "settled"
 
     trade_id = log_trade(
@@ -68,6 +66,11 @@ def execute_paper_trade(
         pnl=pnl,
         status=status,
     )
+
+    deduct_paper_balance(db_path, cost + fees)
+
+    if outcome is not None:
+        credit_paper_balance(db_path, payout)
 
     if pnl is not None:
         log.info(
