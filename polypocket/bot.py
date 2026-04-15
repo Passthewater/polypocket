@@ -21,7 +21,7 @@ from polypocket.feeds.polymarket import (
     fetch_resolution,
     subscribe_and_stream,
 )
-from polypocket.ledger import find_trade_by_window_slug, init_db
+from polypocket.ledger import find_trade_by_window_slug, init_db, log_snapshot
 from polypocket.observer import compute_model_p_up, compute_realized_vol
 from polypocket.quotes import QuoteSnapshot, validate_quote
 from polypocket.risk import RiskManager
@@ -50,6 +50,10 @@ class Bot:
         self._ptb_last_fetch: float = 0.0
         self._ptb_provisional: bool = False
         self._resolution_last_fetch: float = 0.0
+        self._open_snapshot_emitted = False
+        self._best_edge_abs: float = 0.0
+        self._best_edge_snapshot: dict | None = None
+        self._window_skip_reason: str | None = None
         # Trades from past windows awaiting resolution
         self._pending_settlements: list[dict] = []
 
@@ -94,6 +98,19 @@ class Bot:
         t_elapsed = now - window.start_time
 
         if self._current_window_id != window.condition_id:
+            # Flush previous window's skip decision snapshot before settling/resetting
+            if self._current_window is not None:
+                prev_slug = self._current_window.slug
+                if not self._window_traded and self._best_edge_snapshot is not None:
+                    log_snapshot(
+                        self.db_path,
+                        window_slug=prev_slug,
+                        snapshot_type="decision",
+                        stats=self._best_edge_snapshot,
+                        trade_fired=False,
+                        skip_reason=self._window_skip_reason or "no-edge",
+                    )
+
             if self._open_trade and self._current_window is not None:
                 await self._settle_previous_window(self._current_window)
 
@@ -101,6 +118,10 @@ class Bot:
             self._current_window = window
             self._window_traded = False
             self._open_trade = None
+            self._open_snapshot_emitted = False
+            self._best_edge_abs = 0.0
+            self._best_edge_snapshot = None
+            self._window_skip_reason = None
             self.stats["position"] = None
             self.stats["execution_status"] = None
 
@@ -206,6 +227,24 @@ class Bot:
         if self.on_stats_update:
             self.on_stats_update(self.stats)
 
+        if not self._open_snapshot_emitted and self.stats["up_ask"] is not None and self.stats["down_ask"] is not None:
+            self._open_snapshot_emitted = True
+            book_depth = None
+            if window.up_book or window.down_book:
+                book_depth = {"up": window.up_book, "down": window.down_book}
+            log_snapshot(
+                self.db_path,
+                window_slug=window.slug,
+                snapshot_type="open",
+                stats=self.stats,
+                book_depth=book_depth,
+            )
+
+        current_edge_abs = abs(self.stats.get("edge") or 0.0)
+        if current_edge_abs > self._best_edge_abs:
+            self._best_edge_abs = current_edge_abs
+            self._best_edge_snapshot = dict(self.stats)
+
         if t_remaining <= 0:
             if self._open_trade:
                 # Try immediate resolution; if unavailable, park in pending
@@ -252,11 +291,15 @@ class Bot:
             down_ask=window.down_ask,
         )
         if signal is None:
+            if not self._window_traded and self._window_skip_reason is None:
+                self._window_skip_reason = "no-edge"
             return
 
         ok, reason = self.risk.check()
         if not ok:
             log.warning("Risk blocked: %s", reason)
+            if self._window_skip_reason is None:
+                self._window_skip_reason = "risk-blocked"
             return
 
         entry_price = window.up_ask if signal.side == "up" else window.down_ask
@@ -273,6 +316,18 @@ class Bot:
             signal.side,
             entry_price,
             size,
+        )
+
+        book_depth = None
+        if window.up_book or window.down_book:
+            book_depth = {"up": window.up_book, "down": window.down_book}
+        log_snapshot(
+            self.db_path,
+            window_slug=window.slug,
+            snapshot_type="decision",
+            stats=self.stats,
+            book_depth=book_depth,
+            trade_fired=True,
         )
 
         if TRADING_MODE == "paper":
@@ -344,6 +399,14 @@ class Bot:
             else:
                 self.risk.record_loss()
             log.info("SETTLED: %s -> P&L $%.2f", outcome.upper(), pnl)
+        log_snapshot(
+            self.db_path,
+            window_slug=self._current_window.slug if self._current_window else "unknown",
+            snapshot_type="close",
+            stats=self.stats,
+            trade_fired=True,
+            outcome=outcome,
+        )
         self._open_trade = None
         self.stats["position"] = None
         if self.on_trade:

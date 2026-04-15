@@ -7,7 +7,7 @@ import pytest
 from polypocket.config import FEE_RATE
 from polypocket.executor import TradeResult
 from polypocket.feeds.polymarket import Window
-from polypocket.ledger import find_trade_by_window_slug, get_paper_balance, init_db, log_trade
+from polypocket.ledger import find_trade_by_window_slug, get_paper_balance, get_snapshots_for_window, init_db, log_trade
 from polypocket.signal import Signal
 
 
@@ -423,3 +423,185 @@ async def test_bot_preview_edge_exposes_up_side_price(tmp_path: Path):
     assert bot.stats["up_ask"] == window.up_ask
     assert bot.stats["down_ask"] == window.down_ask
     assert bot.stats["quote_status"] == "overround"
+
+
+@pytest.mark.asyncio
+async def test_bot_emits_open_snapshot_on_new_window(tmp_path: Path):
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84250.0
+    bot.signal_engine.evaluate = lambda **kwargs: None
+
+    window = Window(
+        condition_id="abc123",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-snap-open",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(window, "up")
+
+    snapshots = get_snapshots_for_window(str(db_path), "btc-updown-5m-snap-open")
+    assert len(snapshots) == 1
+    assert snapshots[0]["snapshot_type"] == "open"
+    assert snapshots[0]["btc_price"] == 84250.0
+    assert snapshots[0]["window_open_price"] == 84198.0
+
+
+@pytest.mark.asyncio
+async def test_bot_emits_decision_snapshot_on_trade(tmp_path: Path, monkeypatch):
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84350.0
+    bot.signal_engine.evaluate = lambda **kwargs: Signal(
+        side="up",
+        model_p_up=0.75,
+        market_price=0.55,
+        edge=0.20,
+        up_edge=0.20,
+        down_edge=-0.20,
+    )
+    bot.risk.check = lambda: (True, "")
+
+    execute_mock = Mock(return_value=TradeResult(success=True, trade_id=1, pnl=None))
+    monkeypatch.setattr("polypocket.bot.execute_paper_trade", execute_mock)
+
+    window = Window(
+        condition_id="abc123",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-snap-decision",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(window, "up")
+
+    snapshots = get_snapshots_for_window(str(db_path), "btc-updown-5m-snap-decision")
+    decision = [s for s in snapshots if s["snapshot_type"] == "decision"]
+    assert len(decision) == 1
+    assert decision[0]["trade_fired"] == 1
+    assert decision[0]["skip_reason"] is None
+    assert decision[0]["btc_price"] == 84350.0
+
+
+@pytest.mark.asyncio
+async def test_bot_emits_close_snapshot_on_settlement(tmp_path: Path, monkeypatch):
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84350.0
+    bot.signal_engine.evaluate = lambda **kwargs: Signal(
+        side="up",
+        model_p_up=0.75,
+        market_price=0.55,
+        edge=0.20,
+        up_edge=0.20,
+        down_edge=-0.20,
+    )
+    bot.risk.check = lambda: (True, "")
+
+    execute_mock = Mock(return_value=TradeResult(success=True, trade_id=1, pnl=None))
+    monkeypatch.setattr("polypocket.bot.execute_paper_trade", execute_mock)
+    monkeypatch.setattr("polypocket.bot.settle_paper_trade", lambda *args, **kwargs: 4.5)
+
+    active_window = Window(
+        condition_id="abc123",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-snap-close",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+    await bot._on_book_update(active_window, "up")
+
+    async def mock_resolution(slug):
+        return "up"
+
+    monkeypatch.setattr(bot_module, "fetch_resolution", mock_resolution)
+
+    next_window = Window(
+        condition_id="def456",
+        question="BTC Up or Down",
+        up_token_id="tok_up2",
+        down_token_id="tok_down2",
+        end_time=time.time() + 480,
+        slug="btc-updown-5m-snap-close-next",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+    await bot._on_book_update(next_window, "up")
+
+    snapshots = get_snapshots_for_window(str(db_path), "btc-updown-5m-snap-close")
+    close = [s for s in snapshots if s["snapshot_type"] == "close"]
+    assert len(close) == 1
+    assert close[0]["outcome"] == "up"
+    assert close[0]["trade_fired"] == 1
+
+
+@pytest.mark.asyncio
+async def test_bot_emits_decision_snapshot_on_skip(tmp_path: Path, monkeypatch):
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84250.0
+    bot.signal_engine.evaluate = lambda **kwargs: None
+
+    active_window = Window(
+        condition_id="abc123",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-snap-skip",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+    await bot._on_book_update(active_window, "up")
+
+    next_window = Window(
+        condition_id="def456",
+        question="BTC Up or Down",
+        up_token_id="tok_up2",
+        down_token_id="tok_down2",
+        end_time=time.time() + 480,
+        slug="btc-updown-5m-snap-skip-next",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+    await bot._on_book_update(next_window, "up")
+
+    snapshots = get_snapshots_for_window(str(db_path), "btc-updown-5m-snap-skip")
+    decision = [s for s in snapshots if s["snapshot_type"] == "decision"]
+    assert len(decision) == 1
+    assert decision[0]["trade_fired"] == 0
+    assert decision[0]["skip_reason"] is not None
