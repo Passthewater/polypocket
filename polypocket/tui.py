@@ -25,6 +25,8 @@ class StatusPanel(Static):
         model = stats.get("model_p_up")
         market = stats.get("market_p_up")
         edge = stats.get("edge")
+        preview_side = stats.get("preview_side")
+        preview_market_price = stats.get("preview_market_price")
         sigma = stats.get("sigma_5min")
         position = stats.get("position")
 
@@ -37,6 +39,8 @@ class StatusPanel(Static):
         lines.append(f"Displacement: {displacement:+.4%}" if displacement is not None else "Displacement: --")
         lines.append(f"P(Up) Model: {model:.1%}" if model is not None else "P(Up) Model: --")
         lines.append(f"P(Up) Market: {market:.1%}" if market is not None else "P(Up) Market: --")
+        if preview_side is not None and preview_market_price is not None and edge is not None:
+            lines.append(f"Preview: {preview_side.upper()} @ {preview_market_price:.1%}")
         lines.append(f"Edge: {edge:+.1%}" if edge is not None else "Edge: --")
         lines.append(f"Volatility: {sigma:.4%}" if sigma else "Volatility: --")
         lines.append("")
@@ -54,6 +58,8 @@ class WindowPanel(Static):
         model = stats.get("model_p_up")
         market = stats.get("market_p_up")
         edge = stats.get("edge")
+        preview_side = stats.get("preview_side")
+        preview_market_price = stats.get("preview_market_price")
 
         lines = ["[bold]ACTIVE WINDOW[/bold]", ""]
         lines.append(f"Window: {slug}")
@@ -67,7 +73,13 @@ class WindowPanel(Static):
             lines.append(f"Model: {model:.1%}  Market: {market:.1%}")
             if edge is not None:
                 indicator = " SIGNAL" if edge >= MIN_EDGE_THRESHOLD else ""
-                lines.append(f"Edge: {edge:+.1%}{indicator}")
+                if preview_side is not None and preview_market_price is not None:
+                    lines.append(
+                        f"Preview: {preview_side.upper()} {preview_market_price:.1%}  "
+                        f"Edge: {edge:+.1%}{indicator}"
+                    )
+                else:
+                    lines.append(f"Edge: {edge:+.1%}{indicator}")
         self.update("\n".join(lines))
 
 

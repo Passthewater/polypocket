@@ -36,6 +36,8 @@ class Bot:
             "model_p_up": None,
             "market_p_up": None,
             "edge": None,
+            "preview_side": None,
+            "preview_market_price": None,
             "sigma_5min": None,
             "t_remaining": None,
             "window_slug": None,
@@ -88,8 +90,17 @@ class Bot:
         up_edge = None if window.up_ask is None else model_p_up - (window.up_ask * (1 + FEE_RATE))
         down_edge = None if window.down_ask is None else (1 - model_p_up) - (window.down_ask * (1 + FEE_RATE))
         preview_edge = None
+        preview_side = None
+        preview_market_price = None
         if up_edge is not None or down_edge is not None:
-            preview_edge = max(value for value in (up_edge, down_edge) if value is not None)
+            if up_edge is not None and (down_edge is None or up_edge >= down_edge):
+                preview_edge = up_edge
+                preview_side = "up"
+                preview_market_price = window.up_ask
+            elif down_edge is not None:
+                preview_edge = down_edge
+                preview_side = "down"
+                preview_market_price = window.down_ask
         self.stats.update(
             {
                 "btc_price": self.binance.latest_price,
@@ -98,6 +109,8 @@ class Bot:
                 "model_p_up": model_p_up,
                 "market_p_up": window.up_ask,
                 "edge": preview_edge,
+                "preview_side": preview_side,
+                "preview_market_price": preview_market_price,
                 "sigma_5min": sigma,
                 "t_remaining": t_remaining,
                 "window_slug": window.slug,

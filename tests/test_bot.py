@@ -84,7 +84,7 @@ async def test_bot_executes_once_per_window(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_bot_preview_edge_uses_fee_adjusted_side_specific_logic(tmp_path: Path):
+async def test_bot_preview_edge_exposes_down_side_price(tmp_path: Path):
     from polypocket.bot import Bot
 
     db_path = tmp_path / "bot.db"
@@ -111,4 +111,37 @@ async def test_bot_preview_edge_uses_fee_adjusted_side_specific_logic(tmp_path: 
     expected_down_edge = (1 - bot.stats["model_p_up"]) - (window.down_ask * (1 + FEE_RATE))
     raw_up_edge = bot.stats["model_p_up"] - window.up_ask
     assert bot.stats["edge"] == pytest.approx(expected_down_edge)
+    assert bot.stats["preview_side"] == "down"
+    assert bot.stats["preview_market_price"] == window.down_ask
     assert bot.stats["edge"] != pytest.approx(raw_up_edge)
+
+
+@pytest.mark.asyncio
+async def test_bot_preview_edge_exposes_up_side_price(tmp_path: Path):
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84350.0
+    bot.signal_engine.evaluate = lambda **kwargs: None
+
+    window = Window(
+        condition_id="abc123",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-123",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.80,
+    )
+
+    await bot._on_book_update(window, "up")
+
+    expected_up_edge = bot.stats["model_p_up"] - (window.up_ask * (1 + FEE_RATE))
+    assert bot.stats["edge"] == pytest.approx(expected_up_edge)
+    assert bot.stats["preview_side"] == "up"
+    assert bot.stats["preview_market_price"] == window.up_ask
