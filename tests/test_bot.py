@@ -260,6 +260,11 @@ async def test_bot_live_mode_open_trade_is_not_rehydrated_into_paper_settlement(
     settle_mock = Mock(return_value=0.0)
     monkeypatch.setattr(bot_module, "settle_paper_trade", settle_mock)
 
+    async def mock_resolution(slug):
+        return "up"
+
+    monkeypatch.setattr(bot_module, "fetch_resolution", mock_resolution)
+
     bot = Bot(db_path=str(db_path), live_order_client=Mock())
     bot.binance.latest_price = 84350.0
 

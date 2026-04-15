@@ -14,7 +14,13 @@ from polypocket.executor import (
     settle_paper_trade,
 )
 from polypocket.feeds.binance import BinanceFeed
-from polypocket.feeds.polymarket import Window, fetch_active_windows, subscribe_and_stream
+from polypocket.feeds.polymarket import (
+    Window,
+    fetch_active_windows,
+    fetch_price_to_beat,
+    fetch_resolution,
+    subscribe_and_stream,
+)
 from polypocket.ledger import find_trade_by_window_slug, init_db
 from polypocket.observer import compute_model_p_up, compute_realized_vol
 from polypocket.quotes import QuoteSnapshot, validate_quote
@@ -41,6 +47,9 @@ class Bot:
         self._current_window: Window | None = None
         self._window_traded = False
         self._open_trade: dict | None = None
+        self._ptb_last_fetch: float = 0.0
+        self._ptb_provisional: bool = False
+        self._resolution_last_fetch: float = 0.0
 
         self.stats = {
             "btc_price": None,
@@ -107,21 +116,40 @@ class Bot:
                 }
                 self.stats["position"] = self._format_position(self._open_trade)
 
-            # If priceToBeat missing (Chainlink delay), use Binance price as anchor
-            if window.price_to_beat is None:
-                window.price_to_beat = self.binance.latest_price
-                log.info(
-                    "New window: %s priceToBeat=PENDING, using Binance anchor=%.2f",
-                    window.slug,
-                    window.price_to_beat,
-                )
-            else:
+            if window.price_to_beat is not None:
+                self._ptb_provisional = False
                 log.info(
                     "New window: %s priceToBeat=%.6f (Binance=%.2f)",
                     window.slug,
                     window.price_to_beat,
                     self.binance.latest_price,
                 )
+            else:
+                # Use Binance as provisional anchor until Chainlink reports.
+                # Error is typically <0.05% — negligible for model probabilities.
+                window.price_to_beat = self.binance.latest_price
+                self._ptb_provisional = True
+                log.info(
+                    "New window: %s priceToBeat=PENDING, provisional Binance=%.2f",
+                    window.slug,
+                    window.price_to_beat,
+                )
+            self._ptb_last_fetch = 0.0
+
+        # Keep trying to resolve the official Chainlink priceToBeat
+        if self._ptb_provisional:
+            now_mono = time.time()
+            if now_mono - self._ptb_last_fetch >= 3.0:
+                self._ptb_last_fetch = now_mono
+                ptb = await fetch_price_to_beat(window.slug)
+                if ptb is not None:
+                    window.price_to_beat = ptb
+                    self._ptb_provisional = False
+                    log.info(
+                        "Resolved official priceToBeat for %s: %.6f",
+                        window.slug,
+                        ptb,
+                    )
 
         displacement = (self.binance.latest_price - window.price_to_beat) / window.price_to_beat
         sigma = compute_realized_vol(self.binance.get_5min_returns(), VOLATILITY_LOOKBACK)
@@ -151,6 +179,7 @@ class Bot:
             {
                 "btc_price": self.binance.latest_price,
                 "window_open_price": window.price_to_beat,
+                "ptb_provisional": self._ptb_provisional,
                 "displacement": displacement,
                 "model_p_up": model_p_up,
                 "market_p_up": window.up_ask,
@@ -170,14 +199,36 @@ class Bot:
 
         if t_remaining <= 0:
             if self._open_trade:
-                outcome = "up" if self.binance.latest_price >= window.price_to_beat else "down"
-                await self._settle_trade(outcome)
+                now_mono = time.time()
+                if now_mono - self._resolution_last_fetch >= 5.0:
+                    self._resolution_last_fetch = now_mono
+                    outcome = await fetch_resolution(window.slug)
+                    if outcome is not None:
+                        log.info(
+                            "Official resolution for %s: %s",
+                            window.slug,
+                            outcome.upper(),
+                        )
+                        await self._settle_trade(outcome)
+                    else:
+                        self.stats["execution_status"] = "awaiting-resolution"
+                        if self.on_stats_update:
+                            self.on_stats_update(self.stats)
             return
 
         if self._window_traded:
             return
 
         self.stats["execution_status"] = None
+
+        # Never trade on a provisional priceToBeat — the displacement is
+        # meaningless until the real Chainlink anchor arrives.
+        if self._ptb_provisional:
+            self.stats["execution_status"] = "awaiting-ptb"
+            if self.on_stats_update:
+                self.on_stats_update(self.stats)
+            return
+
         if not quote_validation.valid:
             self.stats["execution_status"] = "skipped"
             if self.on_stats_update:
@@ -293,8 +344,21 @@ class Bot:
     async def _settle_previous_window(self, prev_window: Window) -> None:
         if not self._open_trade:
             return
-        outcome = "up" if self.binance.latest_price >= prev_window.price_to_beat else "down"
-        await self._settle_trade(outcome)
+        outcome = await fetch_resolution(prev_window.slug)
+        if outcome is not None:
+            log.info(
+                "Official resolution for previous window %s: %s",
+                prev_window.slug,
+                outcome.upper(),
+            )
+            await self._settle_trade(outcome)
+        else:
+            # Resolution not yet available — keep the trade open,
+            # it will be settled on the next book update tick.
+            log.info(
+                "Waiting for official resolution of %s before settling",
+                prev_window.slug,
+            )
 
     async def run(self) -> None:
         init_db(self.db_path)

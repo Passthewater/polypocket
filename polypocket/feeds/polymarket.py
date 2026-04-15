@@ -104,13 +104,18 @@ def parse_5min_btc_markets(markets: list[dict]) -> list[Window]:
 
 
 def parse_book_event(msg: dict) -> dict:
-    """Extract best ask price and size from a WS book event."""
+    """Extract best ask price and size from a WS book event.
+
+    The WS sends asks in descending order (highest first), so the best
+    (lowest) ask is the last element.
+    """
     asks = msg.get("asks", [])
     best_ask = None
     best_ask_size = None
     if asks:
-        best_ask = float(asks[0]["price"])
-        best_ask_size = float(asks[0]["size"])
+        best = min(asks, key=lambda a: float(a["price"]))
+        best_ask = float(best["price"])
+        best_ask_size = float(best["size"])
     return {
         "asset_id": msg.get("asset_id"),
         "best_ask": best_ask,
@@ -148,6 +153,110 @@ async def fetch_active_windows() -> list[Window]:
                 log.error("Failed to fetch %s: %s", slug, exc)
 
     return windows
+
+
+def _extract_ptb(event: dict) -> float | None:
+    """Extract priceToBeat from an event's eventMetadata."""
+    event_meta = event.get("eventMetadata", {})
+    if isinstance(event_meta, str):
+        try:
+            event_meta = json.loads(event_meta)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(event_meta, dict):
+        return None
+    raw = event_meta.get("priceToBeat")
+    return float(raw) if raw is not None else None
+
+
+def _extract_final_price(event: dict) -> float | None:
+    """Extract finalPrice from an event's eventMetadata."""
+    event_meta = event.get("eventMetadata", {})
+    if isinstance(event_meta, str):
+        try:
+            event_meta = json.loads(event_meta)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(event_meta, dict):
+        return None
+    raw = event_meta.get("finalPrice")
+    return float(raw) if raw is not None else None
+
+
+async def fetch_resolution(slug: str) -> str | None:
+    """Fetch the official outcome for a resolved window.
+
+    Returns "up" or "down" based on whether finalPrice >= priceToBeat,
+    or None if the market hasn't resolved yet.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{GAMMA_API}/events", params={"slug": slug}
+            ) as response:
+                if response.status != 200:
+                    return None
+                events = await response.json()
+                if not events:
+                    return None
+                event = events[0]
+                ptb = _extract_ptb(event)
+                fp = _extract_final_price(event)
+                if ptb is None or fp is None:
+                    return None
+                return "up" if fp >= ptb else "down"
+    except Exception as exc:
+        log.error("Failed to fetch resolution for %s: %s", slug, exc)
+        return None
+
+
+async def fetch_price_to_beat(slug: str) -> float | None:
+    """Fetch priceToBeat for a window from the Gamma API.
+
+    Tries two strategies:
+    1. Direct: check eventMetadata.priceToBeat on the window itself.
+    2. Chain: the previous window's finalPrice == this window's priceToBeat,
+       and is often available sooner.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Strategy 1: direct lookup on this window
+            async with session.get(
+                f"{GAMMA_API}/events", params={"slug": slug}
+            ) as response:
+                if response.status != 200:
+                    return None
+                events = await response.json()
+                if not events:
+                    return None
+                ptb = _extract_ptb(events[0])
+                if ptb is not None:
+                    return ptb
+
+            # Strategy 2: previous window's finalPrice
+            match = re.search(r"(\d+)$", slug)
+            if match:
+                prev_ts = int(match.group(1)) - 300
+                prev_slug = slug[: match.start()] + str(prev_ts)
+                async with session.get(
+                    f"{GAMMA_API}/events", params={"slug": prev_slug}
+                ) as response:
+                    if response.status == 200:
+                        prev_events = await response.json()
+                        if prev_events:
+                            fp = _extract_final_price(prev_events[0])
+                            if fp is not None:
+                                log.info(
+                                    "Using previous window finalPrice as priceToBeat: %s -> %.6f",
+                                    prev_slug,
+                                    fp,
+                                )
+                                return fp
+
+            return None
+    except Exception as exc:
+        log.error("Failed to fetch priceToBeat for %s: %s", slug, exc)
+        return None
 
 
 def _parse_event(event: dict) -> Window | None:
@@ -249,7 +358,11 @@ async def subscribe_and_stream(
         try:
             async with websockets.connect(POLYMARKET_WS) as websocket:
                 await websocket.send(
-                    json.dumps({"type": "market", "assets_ids": list(token_to_window)})
+                    json.dumps({
+                        "type": "market",
+                        "assets_ids": list(token_to_window),
+                        "initial_dump": True,
+                    })
                 )
                 backoff = 1
                 last_ping = time.time()

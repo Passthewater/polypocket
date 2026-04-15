@@ -130,7 +130,7 @@ def test_find_duplicate_window_slugs_reports_legacy_duplicates():
     os.unlink(db_path)
 
 
-def test_init_db_rejects_legacy_duplicate_window_slugs():
+def test_init_db_auto_cleans_legacy_duplicate_window_slugs():
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     conn = sqlite3.connect(db_path)
@@ -161,30 +161,13 @@ def test_init_db_rejects_legacy_duplicate_window_slugs():
     )
     conn.close()
 
-    try:
-        with pytest.raises(RuntimeError, match="Duplicate window_slug values exist"):
-            init_db(db_path)
-    finally:
-        check = sqlite3.connect(db_path)
-        tables = {
-            row[0]
-            for row in check.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        }
-        indexes = {
-            row[0]
-            for row in check.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'index'"
-            ).fetchall()
-        }
-        check.close()
-        assert "paper_account" not in tables
-        assert "idx_trades_window_slug" not in indexes
-        assert "idx_trades_timestamp" not in indexes
-        assert "idx_trades_status" not in indexes
-        os.unlink(db_path)
+    init_db(db_path)
 
+    check = sqlite3.connect(db_path)
+    rows = check.execute("SELECT * FROM trades WHERE window_slug = 'dup-slug'").fetchall()
+    check.close()
+    assert len(rows) == 1
+    os.unlink(db_path)
 
 def test_init_db_enforces_unique_window_slug():
     db_path = make_db()

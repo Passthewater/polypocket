@@ -15,7 +15,7 @@ def init_db(db_path: str) -> None:
                 CREATE TABLE IF NOT EXISTS trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    window_slug TEXT NOT NULL,
+                    window_slug TEXT NOT NULL UNIQUE,
                     side TEXT NOT NULL,
                     entry_price REAL NOT NULL,
                     size REAL NOT NULL,
@@ -46,18 +46,15 @@ def init_db(db_path: str) -> None:
                 (PAPER_STARTING_BALANCE,),
             )
 
-            duplicates = conn.execute(
+            # Auto-clean duplicate window_slugs (keep earliest row per slug)
+            conn.execute(
                 """
-                SELECT window_slug
-                FROM trades
-                GROUP BY window_slug
-                HAVING COUNT(*) > 1
-                ORDER BY window_slug
+                DELETE FROM trades
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM trades GROUP BY window_slug
+                )
                 """
-            ).fetchall()
-            if duplicates:
-                slugs = ", ".join(row[0] for row in duplicates)
-                raise RuntimeError(f"Duplicate window_slug values exist: {slugs}")
+            )
 
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC)"

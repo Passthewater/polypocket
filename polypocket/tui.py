@@ -38,8 +38,13 @@ class StatusPanel(Static):
         daily = get_daily_pnl(db_path)
 
         lines = ["[bold]STATUS[/bold]", ""]
+        ptb_provisional = stats.get("ptb_provisional", False)
         lines.append(f"BTC Price: ${btc:,.2f}" if btc else "BTC Price: --")
-        lines.append(f"Window Open: ${open_price:,.2f}" if open_price else "Window Open: --")
+        if open_price:
+            ptb_label = "Window Open: ~$" if ptb_provisional else "Window Open: $"
+            lines.append(f"{ptb_label}{open_price:,.2f}")
+        else:
+            lines.append("Window Open: --")
         lines.append(f"Displacement: {displacement:+.4%}" if displacement is not None else "Displacement: --")
         lines.append(f"P(Up) Model: {model:.1%}" if model is not None else "P(Up) Model: --")
         lines.append(f"P(Up) Market: {market:.1%}" if market is not None else "P(Up) Market: --")
