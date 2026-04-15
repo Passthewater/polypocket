@@ -86,17 +86,18 @@ class Bot:
             open_trade = get_open_trade_by_window_slug(self.db_path, window.slug)
             if open_trade is not None:
                 self._window_traded = True
-                self._open_trade = {
-                    "trade_id": open_trade["id"],
-                    "side": open_trade["side"],
-                    "entry_price": open_trade["entry_price"],
-                    "size": open_trade["size"],
-                }
-                self.stats["position"] = (
-                    f'{open_trade["size"]:.1f} {open_trade["side"].upper()}'
-                    f' @ ${open_trade["entry_price"]:.3f}'
-                )
                 self.stats["execution_status"] = "recovery"
+                if TRADING_MODE == "paper":
+                    self._open_trade = {
+                        "trade_id": open_trade["id"],
+                        "side": open_trade["side"],
+                        "entry_price": open_trade["entry_price"],
+                        "size": open_trade["size"],
+                    }
+                    self.stats["position"] = (
+                        f'{open_trade["size"]:.1f} {open_trade["side"].upper()}'
+                        f' @ ${open_trade["entry_price"]:.3f}'
+                    )
 
             # If priceToBeat missing (Chainlink delay), use Binance price as anchor
             if window.price_to_beat is None:
@@ -168,6 +169,7 @@ class Bot:
         if self._window_traded:
             return
 
+        self.stats["execution_status"] = None
         if not quote_validation.valid:
             self.stats["execution_status"] = "skipped"
             if self.on_stats_update:

@@ -126,6 +126,49 @@ async def test_bot_skips_one_sided_book_and_sets_quote_status(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
+async def test_bot_clears_stale_skipped_status_when_quote_becomes_valid(tmp_path: Path, monkeypatch):
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84350.0
+    bot.signal_engine.evaluate = Mock(return_value=None)
+
+    invalid_window = Window(
+        condition_id="abc123",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-123",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=None,
+    )
+    valid_window = Window(
+        condition_id="abc123",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 170,
+        slug="btc-updown-5m-123",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(invalid_window, "up")
+    assert bot.stats["execution_status"] == "skipped"
+
+    await bot._on_book_update(valid_window, "up")
+
+    assert bot.stats["quote_status"] == "valid"
+    assert bot.stats["execution_status"] is None
+
+
+@pytest.mark.asyncio
 async def test_bot_recovers_existing_open_trade_for_active_slug(tmp_path: Path, monkeypatch):
     from polypocket.bot import Bot
 
@@ -181,6 +224,59 @@ async def test_bot_recovers_existing_open_trade_for_active_slug(tmp_path: Path, 
     assert bot._open_trade["side"] == "up"
     assert bot.stats["execution_status"] == "recovery"
     execute_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bot_live_mode_open_trade_is_not_rehydrated_into_paper_settlement(
+    tmp_path: Path, monkeypatch
+):
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    log_trade(
+        db_path=str(db_path),
+        window_slug="btc-updown-5m-123",
+        side="up",
+        entry_price=0.55,
+        size=10.0,
+        fees=0.10,
+        model_p_up=0.75,
+        market_p_up=0.55,
+        edge=0.20,
+        outcome=None,
+        pnl=None,
+        status="open",
+    )
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+    settle_mock = Mock(return_value=0.0)
+    monkeypatch.setattr(bot_module, "settle_paper_trade", settle_mock)
+
+    bot = Bot(db_path=str(db_path), live_order_client=Mock())
+    bot.binance.latest_price = 84350.0
+
+    expired_window = Window(
+        condition_id="abc123",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() - 1,
+        slug="btc-updown-5m-123",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(expired_window, "up")
+
+    assert bot._window_traded is True
+    assert bot._open_trade is None
+    assert bot.stats["position"] is None
+    assert bot.stats["execution_status"] == "recovery"
+    settle_mock.assert_not_called()
 
 
 @pytest.mark.asyncio
