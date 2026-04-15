@@ -14,7 +14,9 @@ from polypocket.ledger import (
     get_session_stats,
     find_duplicate_window_slugs,
     find_trade_by_window_slug,
+    get_snapshots_for_window,
     init_db,
+    log_snapshot,
     log_trade,
 )
 
@@ -220,4 +222,151 @@ def test_init_creates_window_snapshots_table():
     ).fetchall()
     conn.close()
     assert len(tables) == 1
+    os.unlink(db_path)
+
+
+def test_log_snapshot_inserts_and_retrieves():
+    db_path = make_db()
+    log_snapshot(
+        db_path,
+        window_slug="btc-updown-5m-100",
+        snapshot_type="open",
+        stats={
+            "btc_price": 84250.0,
+            "window_open_price": 84198.0,
+            "ptb_provisional": False,
+            "displacement": 0.000617,
+            "sigma_5min": 0.0012,
+            "model_p_up": 0.68,
+            "t_remaining": 280.0,
+            "up_ask": 0.55,
+            "down_ask": 0.45,
+            "market_p_up": 0.55,
+            "edge": 0.06,
+            "preview_side": "up",
+            "quote_status": "valid",
+        },
+    )
+    rows = get_snapshots_for_window(db_path, "btc-updown-5m-100")
+    assert len(rows) == 1
+    assert rows[0]["snapshot_type"] == "open"
+    assert rows[0]["btc_price"] == 84250.0
+    assert rows[0]["displacement"] == pytest.approx(0.000617)
+    os.unlink(db_path)
+
+
+def test_log_snapshot_upserts_on_duplicate():
+    db_path = make_db()
+    log_snapshot(
+        db_path,
+        window_slug="btc-updown-5m-100",
+        snapshot_type="open",
+        stats={
+            "btc_price": 84250.0,
+            "window_open_price": 84198.0,
+            "ptb_provisional": True,
+            "displacement": 0.0006,
+            "sigma_5min": 0.001,
+            "model_p_up": 0.65,
+            "t_remaining": 290.0,
+            "up_ask": 0.55,
+            "down_ask": 0.45,
+            "market_p_up": 0.55,
+            "edge": 0.05,
+            "preview_side": "up",
+            "quote_status": "valid",
+        },
+    )
+    log_snapshot(
+        db_path,
+        window_slug="btc-updown-5m-100",
+        snapshot_type="open",
+        stats={
+            "btc_price": 84300.0,
+            "window_open_price": 84198.0,
+            "ptb_provisional": False,
+            "displacement": 0.0012,
+            "sigma_5min": 0.001,
+            "model_p_up": 0.70,
+            "t_remaining": 280.0,
+            "up_ask": 0.56,
+            "down_ask": 0.44,
+            "market_p_up": 0.56,
+            "edge": 0.07,
+            "preview_side": "up",
+            "quote_status": "valid",
+        },
+    )
+    rows = get_snapshots_for_window(db_path, "btc-updown-5m-100")
+    assert len(rows) == 1
+    assert rows[0]["btc_price"] == 84300.0
+    os.unlink(db_path)
+
+
+def test_log_snapshot_with_book_depth_and_decision_fields():
+    db_path = make_db()
+    log_snapshot(
+        db_path,
+        window_slug="btc-updown-5m-200",
+        snapshot_type="decision",
+        stats={
+            "btc_price": 84350.0,
+            "window_open_price": 84198.0,
+            "ptb_provisional": False,
+            "displacement": 0.0018,
+            "sigma_5min": 0.0015,
+            "model_p_up": 0.75,
+            "t_remaining": 120.0,
+            "up_ask": 0.55,
+            "down_ask": 0.45,
+            "market_p_up": 0.55,
+            "edge": 0.12,
+            "preview_side": "up",
+            "quote_status": "valid",
+        },
+        book_depth={
+            "up": [{"price": 0.55, "size": 120}, {"price": 0.56, "size": 80}],
+            "down": [{"price": 0.45, "size": 100}, {"price": 0.46, "size": 60}],
+        },
+        trade_fired=True,
+    )
+    rows = get_snapshots_for_window(db_path, "btc-updown-5m-200")
+    assert len(rows) == 1
+    assert rows[0]["trade_fired"] == 1
+    assert '"price": 0.55' in rows[0]["up_book_json"]
+    os.unlink(db_path)
+
+
+def test_log_snapshot_close_with_outcome():
+    db_path = make_db()
+    log_snapshot(
+        db_path,
+        window_slug="btc-updown-5m-300",
+        snapshot_type="close",
+        stats={
+            "btc_price": 84400.0,
+            "window_open_price": 84198.0,
+            "ptb_provisional": False,
+            "displacement": 0.0024,
+            "sigma_5min": 0.0015,
+            "model_p_up": 0.82,
+            "t_remaining": 0.0,
+            "up_ask": 0.90,
+            "down_ask": 0.10,
+            "market_p_up": 0.90,
+            "edge": 0.0,
+            "preview_side": "up",
+            "quote_status": "valid",
+        },
+        trade_fired=False,
+        skip_reason="no-edge",
+        outcome="up",
+        final_price=84400.0,
+    )
+    rows = get_snapshots_for_window(db_path, "btc-updown-5m-300")
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "up"
+    assert rows[0]["final_price"] == 84400.0
+    assert rows[0]["skip_reason"] == "no-edge"
+    assert rows[0]["trade_fired"] == 0
     os.unlink(db_path)

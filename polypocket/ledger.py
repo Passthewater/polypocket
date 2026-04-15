@@ -295,3 +295,78 @@ def credit_paper_balance(db_path: str, amount: float) -> None:
             (amount,),
         )
         conn.commit()
+
+
+def log_snapshot(
+    db_path: str,
+    window_slug: str,
+    snapshot_type: str,
+    stats: dict,
+    book_depth: dict | None = None,
+    trade_fired: bool | None = None,
+    skip_reason: str | None = None,
+    outcome: str | None = None,
+    final_price: float | None = None,
+) -> None:
+    """Write a window snapshot (open/decision/close) for finetuning data capture."""
+    import json
+
+    up_book_json = None
+    down_book_json = None
+    if book_depth is not None:
+        up_book_json = json.dumps(book_depth.get("up"))
+        down_book_json = json.dumps(book_depth.get("down"))
+
+    trade_fired_int = None
+    if trade_fired is not None:
+        trade_fired_int = 1 if trade_fired else 0
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO window_snapshots (
+                window_slug, snapshot_type,
+                btc_price, window_open_price, ptb_provisional, displacement,
+                sigma_5min, model_p_up, t_remaining,
+                up_ask, down_ask, market_p_up, edge, preview_side, quote_status,
+                up_book_json, down_book_json,
+                trade_fired, skip_reason,
+                outcome, final_price
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                window_slug,
+                snapshot_type,
+                stats.get("btc_price"),
+                stats.get("window_open_price"),
+                1 if stats.get("ptb_provisional") else 0,
+                stats.get("displacement"),
+                stats.get("sigma_5min"),
+                stats.get("model_p_up"),
+                stats.get("t_remaining"),
+                stats.get("up_ask"),
+                stats.get("down_ask"),
+                stats.get("market_p_up"),
+                stats.get("edge"),
+                stats.get("preview_side"),
+                stats.get("quote_status"),
+                up_book_json,
+                down_book_json,
+                trade_fired_int,
+                skip_reason,
+                outcome,
+                final_price,
+            ),
+        )
+        conn.commit()
+
+
+def get_snapshots_for_window(db_path: str, window_slug: str) -> list[dict]:
+    """Retrieve all snapshots for a given window slug."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM window_snapshots WHERE window_slug = ? ORDER BY id",
+            (window_slug,),
+        ).fetchall()
+        return [dict(row) for row in rows]
