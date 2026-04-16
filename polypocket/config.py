@@ -9,6 +9,7 @@ load_dotenv()
 # --- Signal thresholds ---
 MIN_EDGE_THRESHOLD = 0.03
 MIN_MODEL_CONFIDENCE = 0.60
+MIN_MODEL_CONFIDENCE_UP = 0.65
 FEE_RATE = 0.072
 
 # --- Position sizing ---

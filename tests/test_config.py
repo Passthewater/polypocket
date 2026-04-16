@@ -3,6 +3,8 @@ from polypocket.config import (
     MAX_CONSECUTIVE_LOSSES,
     MAX_DAILY_LOSS,
     MIN_EDGE_THRESHOLD,
+    MIN_MODEL_CONFIDENCE,
+    MIN_MODEL_CONFIDENCE_UP,
     POSITION_SIZE_USDC,
     TRADING_MODE,
     VOLATILITY_LOOKBACK,
@@ -21,6 +23,11 @@ def test_defaults_are_sane():
     assert WINDOW_ENTRY_MIN_ELAPSED == 60
     assert WINDOW_ENTRY_MIN_REMAINING == 30
     assert TRADING_MODE == "paper"
+
+
+def test_up_confidence_threshold_is_higher():
+    assert MIN_MODEL_CONFIDENCE_UP == 0.65
+    assert MIN_MODEL_CONFIDENCE_UP > MIN_MODEL_CONFIDENCE
 
 
 def test_min_edge_plus_fee_is_reasonable():
