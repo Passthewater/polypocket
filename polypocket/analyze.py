@@ -516,7 +516,7 @@ def calibration_report(*db_paths: str) -> str:
         down_count = n - up_count
         side_str = f"{up_count}U/{down_count}D"
 
-        flag = " ⚠" if abs(gap) > 0.10 else ""
+        flag = " [!]" if abs(gap) > 0.10 else ""
         lines.append(
             f"| {label} | {n} | {predicted:.1%} | {actual_up:.1%} | {gap:+.1%}{flag} | {side_str} | {win_rate:.0%} | ${total_pnl:+.2f} |"
         )
@@ -536,13 +536,25 @@ def calibration_report(*db_paths: str) -> str:
 
 
 def main() -> None:
-    report = generate_report()
+    import sys
+
     reports_dir = Path("reports")
     reports_dir.mkdir(exist_ok=True)
-    filename = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}-analysis.md"
+    datestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    if "--calibration" in sys.argv:
+        extra_dbs = [a for a in sys.argv[1:] if a != "--calibration" and not a.startswith("-")]
+        db_paths = (PAPER_DB_PATH, *extra_dbs)
+        report = calibration_report(*db_paths)
+        filename = f"{datestamp}-calibration.md"
+    else:
+        report = generate_report()
+        filename = f"{datestamp}-analysis.md"
+
     path = reports_dir / filename
     path.write_text(report, encoding="utf-8")
-    print(f"Report saved to {path}")
+    print(report)
+    print(f"\nReport saved to {path}")
 
 
 if __name__ == "__main__":
