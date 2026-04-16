@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -121,8 +121,8 @@ class TradesPanel(Static):
 
 
 class StatsBar(Static):
-    def update_stats(self, db_path: str) -> None:
-        stats = get_session_stats(db_path)
+    def update_stats(self, db_path: str, since: str | None = None) -> None:
+        stats = get_session_stats(db_path, since=since)
         wins, losses, total = stats["wins"], stats["losses"], stats["total"]
         pnl = stats["pnl"]
         win_rate = f"{wins / total:.0%}" if total > 0 else "--"
@@ -154,6 +154,7 @@ class PolypocketApp(App):
         super().__init__()
         self.bot = Bot()
         self._session_start_time = datetime.now()
+        self._session_start_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         self._bot_ready = False
 
     def compose(self) -> ComposeResult:
@@ -211,7 +212,9 @@ class PolypocketApp(App):
             self.query_one("#status", StatusPanel).update_stats(self.bot.stats, self.bot.db_path)
             self.query_one("#window", WindowPanel).update_stats(self.bot.stats)
             self.query_one("#trades", TradesPanel).update_trades(self.bot.db_path)
-            self.query_one("#stats-bar", StatsBar).update_stats(self.bot.db_path)
+            self.query_one("#stats-bar", StatsBar).update_stats(
+                self.bot.db_path, since=self._session_start_utc
+            )
         except Exception as exc:
             log.error("Panel refresh error: %s", exc)
 
@@ -222,7 +225,7 @@ class PolypocketApp(App):
 
     def action_report(self) -> None:
         rich_log = self.query_one("#log", RichLog)
-        stats = get_session_stats(self.bot.db_path)
+        stats = get_session_stats(self.bot.db_path, since=self._session_start_utc)
         rich_log.write("\n--- SESSION REPORT ---")
         rich_log.write(f"Wins: {stats['wins']}  Losses: {stats['losses']}")
         rich_log.write(f"Total P&L: ${stats['pnl']:+,.2f}")

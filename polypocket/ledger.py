@@ -252,21 +252,33 @@ def get_daily_pnl(db_path: str) -> float:
             """
             SELECT COALESCE(SUM(pnl), 0.0)
             FROM trades
-            WHERE date(timestamp) = date('now') AND pnl IS NOT NULL
+            WHERE date(timestamp, 'localtime') = date('now', 'localtime')
+              AND pnl IS NOT NULL
             """
         ).fetchone()
         return row[0]
 
 
-def get_session_stats(db_path: str) -> dict:
+def get_session_stats(db_path: str, since: str | None = None) -> dict:
     with closing(sqlite3.connect(db_path)) as conn:
-        rows = conn.execute(
-            """
-            SELECT pnl
-            FROM trades
-            WHERE date(timestamp) = date('now') AND pnl IS NOT NULL
-            """
-        ).fetchall()
+        if since:
+            rows = conn.execute(
+                """
+                SELECT pnl
+                FROM trades
+                WHERE timestamp >= ? AND pnl IS NOT NULL
+                """,
+                (since,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT pnl
+                FROM trades
+                WHERE date(timestamp, 'localtime') = date('now', 'localtime')
+                  AND pnl IS NOT NULL
+                """
+            ).fetchall()
 
     wins = sum(1 for row in rows if row[0] > 0)
     losses = sum(1 for row in rows if row[0] < 0)
