@@ -33,3 +33,11 @@ def test_up_confidence_threshold_is_higher():
 def test_min_edge_plus_fee_is_reasonable():
     """Signal engine requires edge > MIN_EDGE_THRESHOLD + FEE_RATE to trade."""
     assert MIN_EDGE_THRESHOLD + FEE_RATE < 0.50
+
+
+def test_calibration_report_returns_string():
+    from polypocket.analyze import calibration_report
+    result = calibration_report()
+    assert isinstance(result, str)
+    assert "Calibration Report" in result
+    assert "Bucket" in result

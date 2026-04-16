@@ -467,6 +467,74 @@ def generate_report(db_path: str = PAPER_DB_PATH) -> str:
     return "\n".join(lines)
 
 
+def calibration_report(*db_paths: str) -> str:
+    """Trade-based calibration: bins settled trades by model_p_up decile.
+
+    Pass multiple DB paths to merge data (e.g., current + backup).
+    Defaults to PAPER_DB_PATH if no paths given.
+    """
+    if not db_paths:
+        db_paths = (PAPER_DB_PATH,)
+
+    all_trades = []
+    for db_path in db_paths:
+        all_trades.extend(
+            _fetch_all(db_path, "SELECT * FROM trades WHERE status='settled' AND model_p_up IS NOT NULL")
+        )
+
+    if not all_trades:
+        return "Calibration Report\n\nNo settled trades with model_p_up data."
+
+    lines: list[str] = []
+    lines.append(f"# Calibration Report (N={len(all_trades)} trades)\n")
+
+    # Bucket by model_p_up decile
+    buckets: dict[str, list[dict]] = {}
+    for t in all_trades:
+        decile = int(t["model_p_up"] * 10) / 10
+        decile = min(decile, 0.9)  # clamp 1.0 into 0.9-1.0 bucket
+        label = f"{decile:.1f}-{decile + 0.1:.1f}"
+        buckets.setdefault(label, []).append(t)
+
+    # Header
+    lines.append("| Bucket | Trades | Predicted P(up) | Actual P(up) | Gap | Side | Win Rate | PnL |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+
+    for label in sorted(buckets.keys()):
+        items = buckets[label]
+        n = len(items)
+        predicted = sum(t["model_p_up"] for t in items) / n
+        actual_up = sum(1 for t in items if t["outcome"] == "up") / n
+        gap = actual_up - predicted
+
+        wins = sum(1 for t in items if t["side"] == t["outcome"])
+        win_rate = wins / n
+
+        total_pnl = sum(t["pnl"] for t in items if t["pnl"] is not None)
+
+        up_count = sum(1 for t in items if t["side"] == "up")
+        down_count = n - up_count
+        side_str = f"{up_count}U/{down_count}D"
+
+        flag = " ⚠" if abs(gap) > 0.10 else ""
+        lines.append(
+            f"| {label} | {n} | {predicted:.1%} | {actual_up:.1%} | {gap:+.1%}{flag} | {side_str} | {win_rate:.0%} | ${total_pnl:+.2f} |"
+        )
+
+    # Overall stats
+    total_predicted = sum(t["model_p_up"] for t in all_trades) / len(all_trades)
+    total_actual = sum(1 for t in all_trades if t["outcome"] == "up") / len(all_trades)
+    total_wins = sum(1 for t in all_trades if t["side"] == t["outcome"])
+    total_pnl = sum(t["pnl"] for t in all_trades if t["pnl"] is not None)
+
+    lines.append("")
+    lines.append(f"**Overall:** Predicted P(up)={total_predicted:.1%}, Actual P(up)={total_actual:.1%}, "
+                 f"Win rate={total_wins}/{len(all_trades)} ({100*total_wins/len(all_trades):.0f}%), "
+                 f"PnL=${total_pnl:+.2f}")
+
+    return "\n".join(lines)
+
+
 def main() -> None:
     report = generate_report()
     reports_dir = Path("reports")
