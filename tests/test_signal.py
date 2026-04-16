@@ -165,6 +165,27 @@ def test_signal_engine_no_signal_when_model_disagrees_with_direction():
     assert signal is None
 
 
+def test_signal_engine_no_up_signal_below_65_confidence():
+    """model_p_up between 0.60-0.65 should NOT fire an UP signal."""
+    engine = SignalEngine()
+    # displacement=0.0003 with sigma_5min=0.0012, t_remaining=180 gives model_p_up=0.6266
+    signal = engine.evaluate(
+        displacement=0.0003,
+        t_elapsed=120.0,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        up_ask=0.45,
+        down_ask=0.80,
+    )
+    # model_p_up ~0.6266 is between old 0.60 and new 0.65 threshold
+    # Should NOT fire UP signal with the new higher threshold
+    if signal is not None:
+        assert signal.side != "up", (
+            f"UP signal fired with model_p_up={signal.model_p_up:.3f}, "
+            f"should require >= 0.65"
+        )
+
+
 def test_signal_engine_fires_when_model_strongly_aligned():
     """Strong displacement + cheap ask + model alignment -> signal fires."""
     engine = SignalEngine()
