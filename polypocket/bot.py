@@ -7,7 +7,6 @@ import time
 from polypocket.config import (
     EDGE_FLOOR,
     EDGE_RANGE,
-    FEE_RATE,
     MAX_POSITION_USDC,
     MIN_POSITION_USDC,
     PAPER_DB_PATH,
@@ -15,6 +14,7 @@ from polypocket.config import (
     VOL_FLOOR,
     VOL_RANGE,
     VOLATILITY_LOOKBACK,
+    effective_ask,
 )
 from polypocket.executor import (
     LiveOrderClient,
@@ -203,8 +203,8 @@ class Bot:
             sigma = 0.001
 
         model_p_up = compute_model_p_up(displacement, max(t_remaining, 0), sigma)
-        up_edge = None if window.up_ask is None else model_p_up - (window.up_ask * (1 + FEE_RATE))
-        down_edge = None if window.down_ask is None else (1 - model_p_up) - (window.down_ask * (1 + FEE_RATE))
+        up_edge = None if window.up_ask is None else model_p_up - effective_ask(window.up_ask)
+        down_edge = None if window.down_ask is None else (1 - model_p_up) - effective_ask(window.down_ask)
         preview_edge = None
         preview_side = None
         preview_market_price = None

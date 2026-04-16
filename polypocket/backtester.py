@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import aiohttp
 
-from polypocket.config import FEE_RATE
+from polypocket.config import fee_shares
 from polypocket.signal import SignalEngine
 
 log = logging.getLogger(__name__)
@@ -81,9 +81,9 @@ def simulate_window(
 
         if signal is not None and signal_result is None:
             entry_price = market_p_up if signal.side == "up" else (1.0 - market_p_up)
-            payout = 1.0 if signal.side == outcome else 0.0
-            fees = entry_price * FEE_RATE
-            pnl = payout - entry_price - fees
+            won = signal.side == outcome
+            fee_sh = fee_shares(1.0, entry_price)
+            pnl = ((1.0 - fee_sh) - entry_price) if won else -entry_price
             signal_result = WindowResult(
                 open_price=open_price,
                 close_price=close_price,

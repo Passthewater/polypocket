@@ -9,7 +9,20 @@ load_dotenv()
 # --- Signal thresholds ---
 MIN_EDGE_THRESHOLD = 0.03
 MIN_MODEL_CONFIDENCE = 0.60
+# Polymarket crypto taker fee coefficient. Actual fee per trade is
+# `size * FEE_RATE * p * (1 - p)` — peaks at p=0.50, zero at the extremes.
+# Fees are charged in shares on buys; worthless on losing side.
 FEE_RATE = 0.072
+
+
+def fee_shares(size: float, price: float) -> float:
+    """Fee charged in shares on a buy of `size` shares at `price`."""
+    return size * FEE_RATE * price * (1.0 - price)
+
+
+def effective_ask(price: float) -> float:
+    """Break-even model probability to buy at `price` (price inflated for fee)."""
+    return price / (1.0 - FEE_RATE * price * (1.0 - price))
 
 # --- Position sizing ---
 MIN_POSITION_USDC = 5.0

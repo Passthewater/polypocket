@@ -3,11 +3,11 @@
 from dataclasses import dataclass
 
 from polypocket.config import (
-    FEE_RATE,
     MIN_EDGE_THRESHOLD,
     MIN_MODEL_CONFIDENCE,
     WINDOW_ENTRY_MIN_ELAPSED,
     WINDOW_ENTRY_MIN_REMAINING,
+    effective_ask,
 )
 from polypocket.observer import compute_model_p_up
 
@@ -47,8 +47,8 @@ class SignalEngine:
             return None
 
         model_p_up = compute_model_p_up(displacement, t_remaining, sigma_5min)
-        up_edge = model_p_up - (up_ask * (1 + FEE_RATE))
-        down_edge = (1 - model_p_up) - (down_ask * (1 + FEE_RATE))
+        up_edge = model_p_up - effective_ask(up_ask)
+        down_edge = (1 - model_p_up) - effective_ask(down_ask)
 
         # Model confidence guard: only trade when the model agrees with the direction
         up_aligned = model_p_up >= MIN_MODEL_CONFIDENCE

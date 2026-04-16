@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Protocol
 
-from polypocket.config import FEE_RATE
+from polypocket.config import fee_shares
 from polypocket.ledger import (
     credit_paper_balance,
     deduct_paper_balance,
@@ -60,13 +60,13 @@ def execute_paper_trade(
         return _window_consumed_result(db_path, window_slug)
 
     cost = entry_price * size
-    fees = cost * FEE_RATE
+    fee_sh = fee_shares(size, entry_price)
 
     balance = get_paper_balance(db_path)
-    if balance < cost + fees:
+    if balance < cost:
         return TradeResult(
             success=False,
-            error=f"Insufficient balance: need ${cost + fees:.2f}, have ${balance:.2f}",
+            error=f"Insufficient balance: need ${cost:.2f}, have ${balance:.2f}",
         )
 
     pnl = None
@@ -74,8 +74,8 @@ def execute_paper_trade(
     payout = 0.0
     if outcome is not None:
         won = signal.side == outcome
-        payout = size if won else 0.0
-        pnl = payout - cost - fees
+        payout = (size - fee_sh) if won else 0.0
+        pnl = payout - cost
         status = "settled"
 
     try:
@@ -85,7 +85,7 @@ def execute_paper_trade(
             side=signal.side,
             entry_price=entry_price,
             size=size,
-            fees=fees,
+            fees=fee_sh,
             model_p_up=signal.model_p_up,
             market_p_up=signal.market_price,
             edge=signal.edge,
@@ -99,7 +99,7 @@ def execute_paper_trade(
             return consumed
         raise
 
-    deduct_paper_balance(db_path, cost + fees)
+    deduct_paper_balance(db_path, cost)
 
     if outcome is not None:
         credit_paper_balance(db_path, payout)
@@ -131,7 +131,7 @@ def execute_live_trade(
         return _window_consumed_result(db_path, window_slug)
 
     client_order_id = _window_client_order_id(window_slug)
-    fees = entry_price * size * FEE_RATE
+    fee_sh = fee_shares(size, entry_price)
     try:
         trade_id = log_trade(
             db_path=db_path,
@@ -139,7 +139,7 @@ def execute_live_trade(
             side=signal.side,
             entry_price=entry_price,
             size=size,
-            fees=fees,
+            fees=fee_sh,
             model_p_up=signal.model_p_up,
             market_p_up=signal.market_price,
             edge=signal.edge,
@@ -171,10 +171,11 @@ def settle_paper_trade(
     outcome: str,
 ) -> float:
     """Settle an open paper trade when the window resolves."""
-    fees = entry_price * size * FEE_RATE
     cost = entry_price * size
-    payout = size if side == outcome else 0.0
-    pnl = payout - cost - fees
+    fee_sh = fee_shares(size, entry_price)
+    won = side == outcome
+    payout = (size - fee_sh) if won else 0.0
+    pnl = payout - cost
 
     credit_paper_balance(db_path, payout)
     update_trade(db_path, trade_id, outcome=outcome, pnl=pnl, status="settled")

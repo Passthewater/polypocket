@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from polypocket.config import FEE_RATE
+from polypocket.config import effective_ask
 from polypocket.executor import TradeResult
 from polypocket.feeds.polymarket import Window
 from polypocket.ledger import find_trade_by_window_slug, get_paper_balance, get_snapshots_for_window, init_db, log_trade
@@ -380,7 +380,7 @@ async def test_bot_preview_edge_exposes_down_side_price(tmp_path: Path):
 
     await bot._on_book_update(window, "up")
 
-    expected_down_edge = (1 - bot.stats["model_p_up"]) - (window.down_ask * (1 + FEE_RATE))
+    expected_down_edge = (1 - bot.stats["model_p_up"]) - effective_ask(window.down_ask)
     raw_up_edge = bot.stats["model_p_up"] - window.up_ask
     assert bot.stats["edge"] == pytest.approx(expected_down_edge)
     assert bot.stats["preview_side"] == "down"
@@ -416,7 +416,7 @@ async def test_bot_preview_edge_exposes_up_side_price(tmp_path: Path):
 
     await bot._on_book_update(window, "up")
 
-    expected_up_edge = bot.stats["model_p_up"] - (window.up_ask * (1 + FEE_RATE))
+    expected_up_edge = bot.stats["model_p_up"] - effective_ask(window.up_ask)
     assert bot.stats["edge"] == pytest.approx(expected_up_edge)
     assert bot.stats["preview_side"] == "up"
     assert bot.stats["preview_market_price"] == window.up_ask

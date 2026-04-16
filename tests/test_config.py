@@ -39,8 +39,8 @@ def test_dynamic_sizing_params():
 
 
 def test_min_edge_plus_fee_is_reasonable():
-    """Signal engine requires edge > MIN_EDGE_THRESHOLD + FEE_RATE to trade."""
-    assert MIN_EDGE_THRESHOLD + FEE_RATE < 0.50
+    """Worst-case effective fee surcharge (at p=0.5) plus threshold must leave room to trade."""
+    assert MIN_EDGE_THRESHOLD + FEE_RATE * 0.25 < 0.50
 
 
 def test_calibration_report_returns_string():

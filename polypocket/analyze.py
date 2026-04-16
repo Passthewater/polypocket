@@ -20,6 +20,7 @@ from polypocket.config import (
     VOLATILITY_LOOKBACK,
     WINDOW_ENTRY_MIN_ELAPSED,
     WINDOW_ENTRY_MIN_REMAINING,
+    fee_shares,
 )
 
 
@@ -240,10 +241,10 @@ def generate_report(db_path: str = PAPER_DB_PATH) -> str:
                 vol_scale = min(max((sigma - VOL_FLOOR) / VOL_RANGE, 0.0), 1.0)
                 size_usdc = MIN_POSITION_USDC + (edge_scale * vol_scale) * (MAX_POSITION_USDC - MIN_POSITION_USDC)
                 size = size_usdc / entry_price
-                fees = entry_price * size * FEE_RATE
+                fee_sh = fee_shares(size, entry_price)
                 cost = entry_price * size
-                payout = size if would_have_won else 0.0
-                hypothetical_pnl = payout - cost - fees
+                payout = (size - fee_sh) if would_have_won else 0.0
+                hypothetical_pnl = payout - cost
                 missed.append({
                     "slug": slug,
                     "side": s["preview_side"],
