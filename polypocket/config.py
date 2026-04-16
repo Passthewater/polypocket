@@ -9,7 +9,6 @@ load_dotenv()
 # --- Signal thresholds ---
 MIN_EDGE_THRESHOLD = 0.03
 MIN_MODEL_CONFIDENCE = 0.60
-MIN_MODEL_CONFIDENCE_UP = 0.65
 FEE_RATE = 0.072
 
 # --- Position sizing ---
@@ -21,7 +20,7 @@ MAX_CONSECUTIVE_LOSSES = 5
 
 # --- Signal model ---
 VOLATILITY_LOOKBACK = 50
-MODEL_TAIL_DF = 2  # degrees of freedom for t-distribution; lower = fatter tails
+MODEL_TAIL_DF = 5  # degrees of freedom for t-distribution; lower = fatter tails
 
 # --- Entry timing ---
 WINDOW_ENTRY_MIN_ELAPSED = 60
