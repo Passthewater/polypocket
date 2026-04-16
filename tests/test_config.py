@@ -5,6 +5,7 @@ from polypocket.config import (
     MIN_EDGE_THRESHOLD,
     MIN_MODEL_CONFIDENCE,
     MIN_MODEL_CONFIDENCE_UP,
+    MODEL_TAIL_DF,
     POSITION_SIZE_USDC,
     TRADING_MODE,
     VOLATILITY_LOOKBACK,
@@ -28,6 +29,11 @@ def test_defaults_are_sane():
 def test_up_confidence_threshold_is_higher():
     assert MIN_MODEL_CONFIDENCE_UP == 0.65
     assert MIN_MODEL_CONFIDENCE_UP > MIN_MODEL_CONFIDENCE
+
+
+def test_model_tail_df_exists():
+    assert isinstance(MODEL_TAIL_DF, (int, float))
+    assert MODEL_TAIL_DF > 1
 
 
 def test_min_edge_plus_fee_is_reasonable():
