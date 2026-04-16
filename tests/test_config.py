@@ -7,6 +7,7 @@ from polypocket.config import (
     MAX_POSITION_USDC,
     MIN_EDGE_THRESHOLD,
     MIN_MODEL_CONFIDENCE,
+    MIN_MODEL_CONFIDENCE_UP,
     MIN_POSITION_USDC,
     TRADING_MODE,
     VOL_FLOOR,
@@ -28,6 +29,9 @@ def test_defaults_are_sane():
     assert WINDOW_ENTRY_MIN_ELAPSED == 60
     assert WINDOW_ENTRY_MIN_REMAINING == 30
     assert TRADING_MODE == "paper"
+    assert MIN_MODEL_CONFIDENCE == 0.60
+    assert MIN_MODEL_CONFIDENCE_UP == 0.70
+    assert MIN_MODEL_CONFIDENCE_UP > MIN_MODEL_CONFIDENCE
 
 
 def test_dynamic_sizing_params():

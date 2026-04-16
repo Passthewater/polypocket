@@ -8,7 +8,11 @@ load_dotenv()
 
 # --- Signal thresholds ---
 MIN_EDGE_THRESHOLD = 0.03
+# DOWN threshold (via `model_p_up <= 1 - MIN_MODEL_CONFIDENCE`) and the symmetric
+# floor for UP. UP gets its own, higher threshold because UP-side trades in the
+# 60–70% bucket have historically been -EV; see reports/2026-04-16-calibration.md.
 MIN_MODEL_CONFIDENCE = 0.60
+MIN_MODEL_CONFIDENCE_UP = 0.70
 # Polymarket crypto taker fee coefficient. Actual fee per trade is
 # `size * FEE_RATE * p * (1 - p)` — peaks at p=0.50, zero at the extremes.
 # Fees are charged in shares on buys; worthless on losing side.
