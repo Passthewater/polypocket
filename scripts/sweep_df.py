@@ -78,6 +78,10 @@ def main():
     trades = fetch_trades(*db_paths)
     print(f"Loaded {len(trades)} trades from {', '.join(db_paths)}\n")
 
+    if not trades:
+        print("No qualifying trades found. Need settled trades with decision snapshots.")
+        return
+
     df_values = [2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 50, 1000]
 
     print(f"{'df':>6}  {'MAE':>8}  {'Dir Acc':>8}  {'N':>5}")

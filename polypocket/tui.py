@@ -11,7 +11,7 @@ from textual.containers import Horizontal
 from textual.widgets import Footer, Header, RichLog, Static
 
 from polypocket.bot import Bot
-from polypocket.config import MAX_DAILY_LOSS, MIN_EDGE_THRESHOLD, POSITION_SIZE_USDC, TRADING_MODE
+from polypocket.config import MAX_DAILY_LOSS, MAX_POSITION_USDC, MIN_EDGE_THRESHOLD, MIN_POSITION_USDC, TRADING_MODE
 from polypocket.ledger import get_daily_pnl, get_paper_balance, get_recent_trades, get_session_stats
 
 log = logging.getLogger(__name__)
@@ -245,7 +245,7 @@ class PolypocketApp(App):
 
     def action_adjust_size(self) -> None:
         self.query_one("#log", RichLog).write(
-            f"Current position size: ${POSITION_SIZE_USDC:.2f}."
+            f"Position size: ${MIN_POSITION_USDC:.0f}-${MAX_POSITION_USDC:.0f} (edge x vol scaled)."
         )
 
     def action_adjust_loss(self) -> None:

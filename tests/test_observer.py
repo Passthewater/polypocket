@@ -87,12 +87,27 @@ def test_build_observation_record_uses_price_to_beat():
     assert isclose(record.displacement, (84231.42 - 84198.00) / 84198.00)
 
 
-def test_compute_model_p_up_fat_tails():
-    """With t-distribution, extreme displacements should NOT produce near-1.0 probabilities."""
+def test_compute_model_p_up_extreme_displacement():
+    """With large displacement and time remaining, P(Up) should be high but not 1.0."""
     probability = compute_model_p_up(
         displacement=0.002,
         t_remaining=120.0,
         sigma_5min=0.0012,
     )
     assert probability > 0.5
-    assert probability < 0.98
+    assert probability < 1.0
+
+
+def test_compute_model_p_up_matches_norm():
+    """Verify output matches scipy norm CDF directly."""
+    from math import sqrt
+    from scipy.stats import norm
+
+    displacement = 0.001
+    t_remaining = 150.0
+    sigma_5min = 0.0010
+    sigma_remaining = sigma_5min * sqrt(t_remaining / 300.0)
+    expected = float(norm.cdf(displacement / sigma_remaining))
+
+    actual = compute_model_p_up(displacement, t_remaining, sigma_5min)
+    assert isclose(actual, expected, rel_tol=1e-9)

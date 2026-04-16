@@ -4,7 +4,18 @@ import asyncio
 import logging
 import time
 
-from polypocket.config import FEE_RATE, PAPER_DB_PATH, POSITION_SIZE_USDC, TRADING_MODE, VOLATILITY_LOOKBACK
+from polypocket.config import (
+    EDGE_FLOOR,
+    EDGE_RANGE,
+    FEE_RATE,
+    MAX_POSITION_USDC,
+    MIN_POSITION_USDC,
+    PAPER_DB_PATH,
+    TRADING_MODE,
+    VOL_FLOOR,
+    VOL_RANGE,
+    VOLATILITY_LOOKBACK,
+)
 from polypocket.executor import (
     LiveOrderClient,
     TradeResult,
@@ -312,9 +323,12 @@ class Bot:
         if entry_price is None:
             return
 
-        size = POSITION_SIZE_USDC / entry_price
+        edge_scale = min(max((signal.edge - EDGE_FLOOR) / EDGE_RANGE, 0.0), 1.0)
+        vol_scale = min(max((sigma - VOL_FLOOR) / VOL_RANGE, 0.0), 1.0)
+        size_usdc = MIN_POSITION_USDC + (edge_scale * vol_scale) * (MAX_POSITION_USDC - MIN_POSITION_USDC)
+        size = size_usdc / entry_price
         log.info(
-            "SIGNAL: %s edge=%.1f%% (model=%.1f%% mkt=%.1f%%) -> %s @ $%.3f x%.1f",
+            "SIGNAL: %s edge=%.1f%% (model=%.1f%% mkt=%.1f%%) -> %s @ $%.3f x%.1f ($%.1f)",
             signal.side.upper(),
             signal.edge * 100,
             signal.model_p_up * 100,
@@ -322,6 +336,7 @@ class Bot:
             signal.side,
             entry_price,
             size,
+            size_usdc,
         )
 
         book_depth = None

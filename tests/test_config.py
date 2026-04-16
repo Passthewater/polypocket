@@ -1,13 +1,16 @@
 from polypocket.config import (
+    EDGE_FLOOR,
+    EDGE_RANGE,
     FEE_RATE,
     MAX_CONSECUTIVE_LOSSES,
     MAX_DAILY_LOSS,
+    MAX_POSITION_USDC,
     MIN_EDGE_THRESHOLD,
     MIN_MODEL_CONFIDENCE,
-    MIN_MODEL_CONFIDENCE_UP,
-    MODEL_TAIL_DF,
-    POSITION_SIZE_USDC,
+    MIN_POSITION_USDC,
     TRADING_MODE,
+    VOL_FLOOR,
+    VOL_RANGE,
     VOLATILITY_LOOKBACK,
     WINDOW_ENTRY_MIN_ELAPSED,
     WINDOW_ENTRY_MIN_REMAINING,
@@ -17,7 +20,8 @@ from polypocket.config import (
 def test_defaults_are_sane():
     assert MIN_EDGE_THRESHOLD == 0.03
     assert FEE_RATE == 0.072
-    assert POSITION_SIZE_USDC == 10.0
+    assert MIN_POSITION_USDC == 5.0
+    assert MAX_POSITION_USDC == 20.0
     assert MAX_DAILY_LOSS == 50.0
     assert MAX_CONSECUTIVE_LOSSES == 5
     assert VOLATILITY_LOOKBACK == 50
@@ -26,14 +30,12 @@ def test_defaults_are_sane():
     assert TRADING_MODE == "paper"
 
 
-def test_up_confidence_threshold_is_higher():
-    assert MIN_MODEL_CONFIDENCE_UP == 0.65
-    assert MIN_MODEL_CONFIDENCE_UP > MIN_MODEL_CONFIDENCE
-
-
-def test_model_tail_df_exists():
-    assert isinstance(MODEL_TAIL_DF, (int, float))
-    assert MODEL_TAIL_DF > 1
+def test_dynamic_sizing_params():
+    assert VOL_FLOOR == 0.0005
+    assert VOL_RANGE == 0.0005
+    assert EDGE_FLOOR == 0.03
+    assert EDGE_RANGE == 0.17
+    assert MIN_POSITION_USDC < MAX_POSITION_USDC
 
 
 def test_min_edge_plus_fee_is_reasonable():

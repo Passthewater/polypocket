@@ -12,7 +12,12 @@ MIN_MODEL_CONFIDENCE = 0.60
 FEE_RATE = 0.072
 
 # --- Position sizing ---
-POSITION_SIZE_USDC = 10.0
+MIN_POSITION_USDC = 5.0
+MAX_POSITION_USDC = 20.0
+VOL_FLOOR = 0.0005
+VOL_RANGE = 0.0005
+EDGE_FLOOR = 0.03
+EDGE_RANGE = 0.17
 
 # --- Risk ---
 MAX_DAILY_LOSS = 50.0
@@ -20,7 +25,6 @@ MAX_CONSECUTIVE_LOSSES = 5
 
 # --- Signal model ---
 VOLATILITY_LOOKBACK = 50
-MODEL_TAIL_DF = 5  # degrees of freedom for t-distribution; lower = fatter tails
 
 # --- Entry timing ---
 WINDOW_ENTRY_MIN_ELAPSED = 60

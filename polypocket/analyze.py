@@ -8,10 +8,15 @@ from pathlib import Path
 
 from polypocket.config import (
     BOOK_MAX_TOTAL_ASK,
+    EDGE_FLOOR,
+    EDGE_RANGE,
     FEE_RATE,
+    MAX_POSITION_USDC,
     MIN_EDGE_THRESHOLD,
+    MIN_POSITION_USDC,
     PAPER_DB_PATH,
-    POSITION_SIZE_USDC,
+    VOL_FLOOR,
+    VOL_RANGE,
     VOLATILITY_LOOKBACK,
     WINDOW_ENTRY_MIN_ELAPSED,
     WINDOW_ENTRY_MIN_REMAINING,
@@ -229,7 +234,12 @@ def generate_report(db_path: str = PAPER_DB_PATH) -> str:
             would_have_won = s["preview_side"] == close_snap["outcome"]
             entry_price = s.get("up_ask") if s["preview_side"] == "up" else s.get("down_ask")
             if entry_price and entry_price > 0:
-                size = POSITION_SIZE_USDC / entry_price
+                edge = s.get("edge") or 0.0
+                sigma = s.get("sigma_5min") or 0.0
+                edge_scale = min(max((edge - EDGE_FLOOR) / EDGE_RANGE, 0.0), 1.0)
+                vol_scale = min(max((sigma - VOL_FLOOR) / VOL_RANGE, 0.0), 1.0)
+                size_usdc = MIN_POSITION_USDC + (edge_scale * vol_scale) * (MAX_POSITION_USDC - MIN_POSITION_USDC)
+                size = size_usdc / entry_price
                 fees = entry_price * size * FEE_RATE
                 cost = entry_price * size
                 payout = size if would_have_won else 0.0
@@ -376,7 +386,7 @@ def generate_report(db_path: str = PAPER_DB_PATH) -> str:
         [
             ["MIN_EDGE_THRESHOLD", f"{MIN_EDGE_THRESHOLD:.1%}"],
             ["FEE_RATE", f"{FEE_RATE:.1%}"],
-            ["POSITION_SIZE_USDC", f"${POSITION_SIZE_USDC:.2f}"],
+            ["POSITION_SIZE", f"${MIN_POSITION_USDC:.0f}-${MAX_POSITION_USDC:.0f} (edge x vol)"],
             ["VOLATILITY_LOOKBACK", f"{VOLATILITY_LOOKBACK} windows"],
             ["WINDOW_ENTRY_MIN_ELAPSED", f"{WINDOW_ENTRY_MIN_ELAPSED}s"],
             ["WINDOW_ENTRY_MIN_REMAINING", f"{WINDOW_ENTRY_MIN_REMAINING}s"],
