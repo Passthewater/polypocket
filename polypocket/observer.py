@@ -7,7 +7,9 @@ import time
 from dataclasses import asdict, dataclass
 from math import sqrt
 
-from scipy.stats import norm
+from scipy.stats import t as t_dist
+
+from polypocket.config import MODEL_TAIL_DF
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +49,7 @@ def compute_model_p_up(
             return 0.0
         return 0.5
 
-    return float(norm.cdf(displacement / sigma_remaining))
+    return float(t_dist.cdf(displacement / sigma_remaining, df=MODEL_TAIL_DF))
 
 
 def compute_realized_vol(returns: list[float], lookback: int = 50) -> float:

@@ -85,3 +85,14 @@ def test_build_observation_record_uses_price_to_beat():
     )
     assert record.window_open_price == 84198.00
     assert isclose(record.displacement, (84231.42 - 84198.00) / 84198.00)
+
+
+def test_compute_model_p_up_fat_tails():
+    """With t-distribution, extreme displacements should NOT produce near-1.0 probabilities."""
+    probability = compute_model_p_up(
+        displacement=0.002,
+        t_remaining=120.0,
+        sigma_5min=0.0012,
+    )
+    assert probability > 0.5
+    assert probability < 0.98
