@@ -166,6 +166,65 @@ def test_signal_engine_no_signal_when_model_disagrees_with_direction():
 
 
 
+def test_signal_engine_no_signal_when_up_ask_at_max_entry_price():
+    """UP side at or above MAX_ENTRY_PRICE (0.70) is rejected even with edge."""
+    engine = SignalEngine()
+    signal = engine.evaluate(
+        displacement=0.010,
+        t_elapsed=120.0,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        up_ask=0.70,
+        down_ask=0.40,
+    )
+    assert signal is None
+
+
+def test_signal_engine_no_signal_when_down_ask_at_max_entry_price():
+    """DOWN side at or above MAX_ENTRY_PRICE is rejected even with edge."""
+    engine = SignalEngine()
+    signal = engine.evaluate(
+        displacement=-0.010,
+        t_elapsed=120.0,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        up_ask=0.40,
+        down_ask=0.70,
+    )
+    assert signal is None
+
+
+def test_signal_engine_no_signal_when_down_edge_below_down_threshold():
+    """DOWN needs ≥0.10 edge; a ~0.07 edge should not fire under the new rule."""
+    # model_p_up ≈ 0.37 → (1 - 0.37) - effective_ask(0.55) ≈ 0.07
+    engine = SignalEngine()
+    signal = engine.evaluate(
+        displacement=-0.0003,
+        t_elapsed=120.0,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        up_ask=0.40,
+        down_ask=0.55,
+    )
+    assert signal is None
+
+
+def test_signal_engine_down_fires_when_edge_meets_down_threshold():
+    """DOWN with edge ≥0.10 still fires."""
+    engine = SignalEngine()
+    signal = engine.evaluate(
+        displacement=-0.002,
+        t_elapsed=120.0,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        up_ask=0.99,
+        down_ask=0.40,
+    )
+    assert signal is not None
+    assert signal.side == "down"
+    assert signal.edge >= 0.10
+
+
 def test_signal_engine_fires_when_model_strongly_aligned():
     """Strong displacement + cheap ask + model alignment -> signal fires."""
     engine = SignalEngine()

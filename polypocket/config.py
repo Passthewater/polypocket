@@ -8,6 +8,14 @@ load_dotenv()
 
 # --- Signal thresholds ---
 MIN_EDGE_THRESHOLD = 0.03
+# DOWN side requires a wider edge than UP. Across 203 paper trades the DOWN
+# model was ~21pts overconfident (predicted 73% win rate, actual 51%), and
+# low-edge DOWN fires (<0.10) lost $43 collectively. UP side is well-behaved.
+MIN_EDGE_THRESHOLD_DOWN = 0.10
+# Skip any side whose ask is at or above this. Entries at ≥0.70 lost money on
+# both sides over 203 trades — fee drag plus compressed upside make the math
+# unfavorable near the middle of the book.
+MAX_ENTRY_PRICE = 0.70
 # DOWN threshold (via `model_p_up <= 1 - MIN_MODEL_CONFIDENCE`) and the symmetric
 # floor for UP. UP gets its own, higher threshold because UP-side trades in the
 # 60–70% bucket have historically been -EV; see reports/2026-04-16-calibration.md.

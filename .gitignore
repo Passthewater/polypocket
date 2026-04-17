@@ -4,5 +4,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 paper_trades.db
+paper_trades*.bak.db
 observations.csv
 reports/
