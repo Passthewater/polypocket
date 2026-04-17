@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from polypocket.signal import SignalEngine
 
 
@@ -195,8 +197,9 @@ def test_signal_engine_no_signal_when_down_ask_at_max_entry_price():
 
 
 def test_signal_engine_no_signal_when_down_edge_below_down_threshold():
-    """DOWN needs ≥0.10 edge; a ~0.07 edge should not fire under the new rule."""
-    # model_p_up ≈ 0.37 → (1 - 0.37) - effective_ask(0.55) ≈ 0.07
+    """DOWN needs calibrated edge ≥ MIN_EDGE_THRESHOLD_DOWN; shallow edges shouldn't fire."""
+    # Raw model_p_up ≈ 0.37 → calibrated via DOWN shrinkage pulls p closer
+    # to 0.5, dropping (1 - p_cal) - effective_ask(0.55) below 0.10.
     engine = SignalEngine()
     signal = engine.evaluate(
         displacement=-0.0003,
@@ -239,3 +242,39 @@ def test_signal_engine_fires_when_model_strongly_aligned():
     assert signal is not None
     assert signal.side == "up"
     assert signal.model_p_up >= 0.60
+
+
+def test_signal_engine_signal_exposes_both_raw_and_calibrated():
+    """Signal records both raw and calibrated model probabilities."""
+    engine = SignalEngine()
+    signal = engine.evaluate(
+        displacement=-0.002,
+        t_elapsed=120.0,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        up_ask=0.99,
+        down_ask=0.40,
+    )
+    assert signal is not None
+    assert signal.side == "down"
+    assert signal.model_p_up_raw is not None
+    # Raw model_p_up is < 0.5 on the DOWN side; calibrated is closer to 0.5.
+    assert signal.model_p_up_raw < signal.model_p_up
+    assert signal.model_p_up < 0.5
+
+
+def test_signal_engine_down_calibration_shrinks_edge_and_may_block():
+    """Aggressive DOWN shrinkage should reduce DOWN edge below threshold."""
+    with patch("polypocket.signal.CALIBRATION_SHRINKAGE_DOWN", 0.0):
+        # With k=0: DOWN p_cal collapses to 0.5, so (1-p_cal)=0.5, and for any
+        # down_ask>0 with fees, the edge will be non-positive → no fire.
+        engine = SignalEngine()
+        signal = engine.evaluate(
+            displacement=-0.002,
+            t_elapsed=120.0,
+            t_remaining=180.0,
+            sigma_5min=0.0012,
+            up_ask=0.99,
+            down_ask=0.40,
+        )
+        assert signal is None

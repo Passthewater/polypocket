@@ -8,9 +8,10 @@ load_dotenv()
 
 # --- Signal thresholds ---
 MIN_EDGE_THRESHOLD = 0.03
-# DOWN side requires a wider edge than UP. Across 203 paper trades the DOWN
-# model was ~21pts overconfident (predicted 73% win rate, actual 51%), and
-# low-edge DOWN fires (<0.10) lost $43 collectively. UP side is well-behaved.
+# Edge threshold checks run on the CALIBRATED probability (see shrinkage
+# factors below). DOWN threshold kept at 0.10 to remain close to sim_filters.py
+# option 11 (`down_shrink_0.30`) — less curve-fit than the in-sample PnL optimum
+# on n=32 DOWN trades.
 MIN_EDGE_THRESHOLD_DOWN = 0.10
 # Skip any side whose ask is at or above this. Entries at ≥0.70 lost money on
 # both sides over 203 trades — fee drag plus compressed upside make the math
@@ -21,6 +22,13 @@ MAX_ENTRY_PRICE = 0.70
 # 60–70% bucket have historically been -EV; see reports/2026-04-16-calibration.md.
 MIN_MODEL_CONFIDENCE = 0.60
 MIN_MODEL_CONFIDENCE_UP = 0.70
+# --- Calibration (per-side shrinkage toward 0.5) ---
+# After 53 post-filter trades: UP gap -5.2pts (within ±5 target, n=21 noisy
+# so keeping identity); DOWN gap -16.4pts (structural). DOWN k=0.30 closes
+# the aggregate gap to -2.8pts (meets the issue's ±5 success criterion) and
+# is the less-overfit choice vs the in-sample PnL peak. Re-tune with more data.
+CALIBRATION_SHRINKAGE_UP = 1.00
+CALIBRATION_SHRINKAGE_DOWN = 0.30
 # Polymarket crypto taker fee coefficient. Actual fee per trade is
 # `size * FEE_RATE * p * (1 - p)` — peaks at p=0.50, zero at the extremes.
 # Fees are charged in shares on buys; worthless on losing side.

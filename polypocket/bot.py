@@ -5,6 +5,8 @@ import logging
 import time
 
 from polypocket.config import (
+    CALIBRATION_SHRINKAGE_DOWN,
+    CALIBRATION_SHRINKAGE_UP,
     EDGE_FLOOR,
     EDGE_RANGE,
     MAX_POSITION_USDC,
@@ -33,7 +35,7 @@ from polypocket.feeds.polymarket import (
     subscribe_and_stream,
 )
 from polypocket.ledger import find_trade_by_window_slug, find_unsettled_trades, init_db, log_snapshot
-from polypocket.observer import compute_model_p_up, compute_realized_vol
+from polypocket.observer import calibrate_p_up, compute_model_p_up, compute_realized_vol
 from polypocket.quotes import QuoteSnapshot, validate_quote
 from polypocket.risk import RiskManager
 from polypocket.signal import SignalEngine
@@ -73,6 +75,7 @@ class Bot:
             "window_open_price": None,
             "displacement": None,
             "model_p_up": None,
+            "model_p_up_calibrated": None,
             "market_p_up": None,
             "edge": None,
             "preview_side": None,
@@ -105,17 +108,23 @@ class Bot:
         await self._poll_pending_settlements()
 
         now = time.time()
-        # The feed subscribes to the current slot AND the next one for
-        # warm-start. Ignore book events for any window that isn't the live
-        # slot — the feed has already updated window.up_ask/down_ask on the
-        # Window object, so state stays warm until it becomes live.
-        if not (window.start_time <= now < window.end_time):
-            return
 
-        t_remaining = window.end_time - now
-        t_elapsed = now - window.start_time
-
-        if self._current_window_id != window.condition_id:
+        # Transition detection. The feed pre-subscribes to BOTH the current
+        # and next slots, so we see alternating book events for two windows.
+        # To avoid oscillating state, only advance off the current window
+        # when either (a) we have no current window yet, (b) the incoming
+        # event is for a window that is currently live, or (c) the tracked
+        # current window has already expired. Mere receipt of a next-slot
+        # book event while the current window is still live is ignored.
+        is_first_window = self._current_window_id is None
+        incoming_is_live = window.start_time <= now < window.end_time
+        current_expired = (
+            self._current_window is not None
+            and self._current_window.end_time <= now
+        )
+        if self._current_window_id != window.condition_id and (
+            is_first_window or incoming_is_live or current_expired
+        ):
             # Flush previous window's skip decision snapshot before settling/resetting
             if self._current_window is not None:
                 prev_slug = self._current_window.slug
@@ -189,6 +198,49 @@ class Bot:
                 )
             self._ptb_last_fetch = 0.0
 
+        # If the current window has expired and we're still holding an open
+        # trade, settle it now — regardless of whether this book event is
+        # for the live slot. Pre-subscribed next-slot events frequently
+        # arrive before any post-expiry event for the old slot.
+        if (
+            self._open_trade is not None
+            and self._current_window is not None
+            and self._current_window.end_time <= now
+        ):
+            outcome = await fetch_resolution(self._current_window.slug)
+            if outcome is not None:
+                log.info(
+                    "Official resolution for %s: %s",
+                    self._current_window.slug,
+                    outcome.upper(),
+                )
+                await self._settle_trade(outcome)
+            else:
+                self._pending_settlements.append({
+                    **self._open_trade,
+                    "window_slug": self._current_window.slug,
+                })
+                self._open_trade = None
+                self.stats["position"] = None
+                self.stats["execution_status"] = None
+                log.info(
+                    "Parked trade for expired window %s, awaiting resolution",
+                    self._current_window.slug,
+                )
+                if self.on_stats_update:
+                    self.on_stats_update(self.stats)
+
+        # Live-only: stats updates, signal evaluation, and mid-window
+        # snapshot emission apply only when the incoming event is for the
+        # window currently in its live slot. Pre-subscribed next-slot events
+        # carry warm asks on the Window object but shouldn't overwrite the
+        # live window's stats or trigger signal evaluation.
+        if not (window.start_time <= now < window.end_time):
+            return
+
+        t_remaining = window.end_time - now
+        t_elapsed = now - window.start_time
+
         # Keep trying to resolve the official Chainlink priceToBeat
         if self._ptb_provisional:
             now_mono = time.time()
@@ -210,8 +262,13 @@ class Bot:
             sigma = 0.001
 
         model_p_up = compute_model_p_up(displacement, max(t_remaining, 0), sigma)
-        up_edge = None if window.up_ask is None else model_p_up - effective_ask(window.up_ask)
-        down_edge = None if window.down_ask is None else (1 - model_p_up) - effective_ask(window.down_ask)
+        model_p_up_cal = calibrate_p_up(
+            model_p_up,
+            up_factor=CALIBRATION_SHRINKAGE_UP,
+            down_factor=CALIBRATION_SHRINKAGE_DOWN,
+        )
+        up_edge = None if window.up_ask is None else model_p_up_cal - effective_ask(window.up_ask)
+        down_edge = None if window.down_ask is None else (1 - model_p_up_cal) - effective_ask(window.down_ask)
         preview_edge = None
         preview_side = None
         preview_market_price = None
@@ -235,6 +292,7 @@ class Bot:
                 "ptb_provisional": self._ptb_provisional,
                 "displacement": displacement,
                 "model_p_up": model_p_up,
+                "model_p_up_calibrated": model_p_up_cal,
                 "market_p_up": window.up_ask,
                 "edge": preview_edge,
                 "preview_side": preview_side,
@@ -267,33 +325,6 @@ class Bot:
         if current_edge_abs > self._best_edge_abs:
             self._best_edge_abs = current_edge_abs
             self._best_edge_snapshot = dict(self.stats)
-
-        if t_remaining <= 0:
-            if self._open_trade:
-                # Try immediate resolution; if unavailable, park in pending
-                outcome = await fetch_resolution(window.slug)
-                if outcome is not None:
-                    log.info(
-                        "Official resolution for %s: %s",
-                        window.slug,
-                        outcome.upper(),
-                    )
-                    await self._settle_trade(outcome)
-                else:
-                    self._pending_settlements.append({
-                        **self._open_trade,
-                        "window_slug": window.slug,
-                    })
-                    self._open_trade = None
-                    self.stats["position"] = None
-                    self.stats["execution_status"] = None
-                    log.info(
-                        "Parked trade for expired window %s, awaiting resolution",
-                        window.slug,
-                    )
-                    if self.on_stats_update:
-                        self.on_stats_update(self.stats)
-            return
 
         if self._window_traded:
             return
@@ -334,11 +365,15 @@ class Bot:
         vol_scale = min(max((sigma - VOL_FLOOR) / VOL_RANGE, 0.0), 1.0)
         size_usdc = MIN_POSITION_USDC + (edge_scale * vol_scale) * (MAX_POSITION_USDC - MIN_POSITION_USDC)
         size = size_usdc / entry_price
+        raw_str = (
+            f"raw={signal.model_p_up_raw * 100:.1f}%" if signal.model_p_up_raw is not None else "raw=n/a"
+        )
         log.info(
-            "SIGNAL: %s edge=%.1f%% (model=%.1f%% mkt=%.1f%%) -> %s @ $%.3f x%.1f ($%.1f)",
+            "SIGNAL: %s edge=%.1f%% (model=%.1f%% %s mkt=%.1f%%) -> %s @ $%.3f x%.1f ($%.1f)",
             signal.side.upper(),
             signal.edge * 100,
             signal.model_p_up * 100,
+            raw_str,
             signal.market_price * 100,
             signal.side,
             entry_price,

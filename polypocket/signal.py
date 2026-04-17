@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 
 from polypocket.config import (
+    CALIBRATION_SHRINKAGE_DOWN,
+    CALIBRATION_SHRINKAGE_UP,
     MAX_ENTRY_PRICE,
     MIN_EDGE_THRESHOLD,
     MIN_EDGE_THRESHOLD_DOWN,
@@ -12,7 +14,7 @@ from polypocket.config import (
     WINDOW_ENTRY_MIN_REMAINING,
     effective_ask,
 )
-from polypocket.observer import compute_model_p_up
+from polypocket.observer import calibrate_p_up, compute_model_p_up
 
 
 @dataclass
@@ -23,6 +25,7 @@ class Signal:
     edge: float
     up_edge: float
     down_edge: float
+    model_p_up_raw: float | None = None
 
 
 class SignalEngine:
@@ -49,12 +52,15 @@ class SignalEngine:
         if sigma_5min <= 0:
             return None
 
-        model_p_up = compute_model_p_up(displacement, t_remaining, sigma_5min)
+        model_p_up_raw = compute_model_p_up(displacement, t_remaining, sigma_5min)
+        model_p_up = calibrate_p_up(
+            model_p_up_raw,
+            up_factor=CALIBRATION_SHRINKAGE_UP,
+            down_factor=CALIBRATION_SHRINKAGE_DOWN,
+        )
         up_edge = model_p_up - effective_ask(up_ask)
         down_edge = (1 - model_p_up) - effective_ask(down_ask)
 
-        # Model confidence guard: only trade when the model agrees with the direction.
-        # UP uses a higher threshold than DOWN because the 60-70% UP bucket is -EV.
         up_aligned = model_p_up >= MIN_MODEL_CONFIDENCE_UP
         down_aligned = model_p_up <= (1 - MIN_MODEL_CONFIDENCE)
 
@@ -70,6 +76,7 @@ class SignalEngine:
             return Signal(
                 side="up",
                 model_p_up=model_p_up,
+                model_p_up_raw=model_p_up_raw,
                 market_price=up_ask,
                 edge=up_edge,
                 up_edge=up_edge,
@@ -79,6 +86,7 @@ class SignalEngine:
             return Signal(
                 side="down",
                 model_p_up=model_p_up,
+                model_p_up_raw=model_p_up_raw,
                 market_price=down_ask,
                 edge=down_edge,
                 up_edge=up_edge,

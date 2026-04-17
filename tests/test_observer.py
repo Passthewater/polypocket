@@ -3,8 +3,38 @@ from math import isclose
 from polypocket.observer import (
     ObservationRecord,
     build_observation_record,
+    calibrate_p_up,
     compute_model_p_up,
 )
+
+
+def test_calibrate_p_up_identity_when_factors_one():
+    for p in (0.01, 0.25, 0.5, 0.75, 0.99):
+        assert isclose(calibrate_p_up(p, up_factor=1.0, down_factor=1.0), p, abs_tol=1e-9)
+
+
+def test_calibrate_p_up_collapses_to_half_when_factors_zero():
+    for p in (0.1, 0.4, 0.6, 0.9):
+        assert isclose(calibrate_p_up(p, up_factor=0.0, down_factor=0.0), 0.5, abs_tol=1e-9)
+
+
+def test_calibrate_p_up_applies_down_factor_below_half():
+    p_raw = 0.20
+    p_cal = calibrate_p_up(p_raw, up_factor=1.0, down_factor=0.5)
+    assert isclose(p_cal, 0.5 + (0.20 - 0.5) * 0.5, abs_tol=1e-9)
+    assert p_cal > p_raw  # shrinkage toward 0.5 raises low p
+
+
+def test_calibrate_p_up_applies_up_factor_above_half():
+    p_raw = 0.90
+    p_cal = calibrate_p_up(p_raw, up_factor=0.80, down_factor=0.5)
+    assert isclose(p_cal, 0.5 + (0.90 - 0.5) * 0.80, abs_tol=1e-9)
+    assert p_cal < p_raw  # shrinkage toward 0.5 lowers high p
+
+
+def test_calibrate_p_up_at_half_is_half():
+    for up, down in ((1.0, 1.0), (0.5, 0.2), (0.0, 0.0)):
+        assert calibrate_p_up(0.5, up_factor=up, down_factor=down) == 0.5
 
 
 def test_compute_model_p_up_btc_above_open():

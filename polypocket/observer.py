@@ -50,6 +50,24 @@ def compute_model_p_up(
     return float(norm.cdf(displacement / sigma_remaining))
 
 
+def calibrate_p_up(
+    p_raw: float,
+    *,
+    up_factor: float,
+    down_factor: float,
+) -> float:
+    """Apply side-dependent shrinkage toward 0.5.
+
+    The raw norm.cdf model is overconfident at the extremes. Shrinking
+    pulls the estimate toward 0.5 by `factor` (1.0 = identity, 0.0 = collapse
+    to 0.5). DOWN-leaning (p_raw<0.5) and UP-leaning (p_raw>0.5) regions are
+    allowed separate factors because post-filter calibration showed DOWN
+    carries a larger overconfidence gap than UP.
+    """
+    factor = up_factor if p_raw >= 0.5 else down_factor
+    return 0.5 + (p_raw - 0.5) * factor
+
+
 def compute_realized_vol(returns: list[float], lookback: int = 50) -> float:
     """Compute realized volatility from recent 5-minute returns."""
     if len(returns) < 2:

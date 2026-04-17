@@ -380,7 +380,7 @@ async def test_bot_preview_edge_exposes_down_side_price(tmp_path: Path):
 
     await bot._on_book_update(window, "up")
 
-    expected_down_edge = (1 - bot.stats["model_p_up"]) - effective_ask(window.down_ask)
+    expected_down_edge = (1 - bot.stats["model_p_up_calibrated"]) - effective_ask(window.down_ask)
     raw_up_edge = bot.stats["model_p_up"] - window.up_ask
     assert bot.stats["edge"] == pytest.approx(expected_down_edge)
     assert bot.stats["preview_side"] == "down"
@@ -543,12 +543,17 @@ async def test_bot_emits_close_snapshot_on_settlement(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(bot_module, "fetch_resolution", mock_resolution)
 
+    # Simulate time passing so the active window has expired by the time
+    # the next-slot book event arrives. In production this is the signal
+    # that triggers the transition + settlement of the previous window.
+    monkeypatch.setattr(bot_module.time, "time", lambda: active_window.end_time + 1)
+
     next_window = Window(
         condition_id="def456",
         question="BTC Up or Down",
         up_token_id="tok_up2",
         down_token_id="tok_down2",
-        end_time=time.time() + 480,
+        end_time=active_window.end_time + 300,
         slug="btc-updown-5m-snap-close-next",
         price_to_beat=84198.0,
         up_ask=0.55,
@@ -565,6 +570,7 @@ async def test_bot_emits_close_snapshot_on_settlement(tmp_path: Path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_bot_emits_decision_snapshot_on_skip(tmp_path: Path, monkeypatch):
+    import polypocket.bot as bot_module
     from polypocket.bot import Bot
 
     db_path = tmp_path / "bot.db"
@@ -587,12 +593,16 @@ async def test_bot_emits_decision_snapshot_on_skip(tmp_path: Path, monkeypatch):
     )
     await bot._on_book_update(active_window, "up")
 
+    # Advance simulated time past the active window's expiry so the
+    # next-slot event triggers transition + decision-snapshot flush.
+    monkeypatch.setattr(bot_module.time, "time", lambda: active_window.end_time + 1)
+
     next_window = Window(
         condition_id="def456",
         question="BTC Up or Down",
         up_token_id="tok_up2",
         down_token_id="tok_down2",
-        end_time=time.time() + 480,
+        end_time=active_window.end_time + 300,
         slug="btc-updown-5m-snap-skip-next",
         price_to_beat=84198.0,
         up_ask=0.55,
@@ -650,13 +660,17 @@ async def test_full_window_lifecycle_produces_three_snapshots(tmp_path: Path, mo
     )
     await bot._on_book_update(w1, "up")
 
+    # Advance simulated time past w1.end_time so the next-slot event is
+    # seen as a post-expiry transition (matches production timing).
+    monkeypatch.setattr(bot_module.time, "time", lambda: w1.end_time + 1)
+
     # Window 2: triggers settlement of window 1
     w2 = Window(
         condition_id="w2",
         question="BTC Up or Down",
         up_token_id="tok_up2",
         down_token_id="tok_down2",
-        end_time=time.time() + 480,
+        end_time=w1.end_time + 300,
         slug="btc-updown-5m-lifecycle-next",
         price_to_beat=84198.0,
         up_ask=0.55,
