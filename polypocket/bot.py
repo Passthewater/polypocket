@@ -105,6 +105,13 @@ class Bot:
         await self._poll_pending_settlements()
 
         now = time.time()
+        # The feed subscribes to the current slot AND the next one for
+        # warm-start. Ignore book events for any window that isn't the live
+        # slot — the feed has already updated window.up_ask/down_ask on the
+        # Window object, so state stays warm until it becomes live.
+        if not (window.start_time <= now < window.end_time):
+            return
+
         t_remaining = window.end_time - now
         t_elapsed = now - window.start_time
 
