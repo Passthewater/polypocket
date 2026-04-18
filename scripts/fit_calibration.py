@@ -38,12 +38,13 @@ def load_trades() -> list[dict]:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """
-        SELECT t.side, t.entry_price, t.size, t.model_p_up, t.edge, t.outcome, t.pnl,
+        SELECT t.side, t.entry_price, t.size, s.model_p_up, t.edge, t.outcome, t.pnl,
                s.up_ask, s.down_ask
         FROM trades t
         LEFT JOIN window_snapshots s
           ON t.window_slug = s.window_slug AND s.snapshot_type='decision'
         WHERE t.status='settled' AND t.outcome IS NOT NULL
+          AND s.model_p_up IS NOT NULL
         """
     ).fetchall()
     conn.close()
