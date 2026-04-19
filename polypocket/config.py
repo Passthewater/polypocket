@@ -23,12 +23,13 @@ MAX_ENTRY_PRICE = 0.70
 MIN_MODEL_CONFIDENCE = 0.60
 MIN_MODEL_CONFIDENCE_UP = 0.70
 # --- Calibration (per-side shrinkage toward 0.5) ---
-# After 53 post-filter trades: UP gap -5.2pts (within ±5 target, n=21 noisy
-# so keeping identity); DOWN gap -16.4pts (structural). DOWN k=0.30 closes
-# the aggregate gap to -2.8pts (meets the issue's ±5 success criterion) and
-# is the less-overfit choice vs the in-sample PnL peak. Re-tune with more data.
+# n=218 checkpoint: UP gap -4.4pts (converging, identity holds); DOWN gap at
+# k=0.30 grew to +12.3pts (under-confident), tripping the plan's pre-committed
+# "raise toward 0.5" trigger. k=0.50 brings DOWN gap to +4.3pts (in-band) on
+# n=31 DOWN trades; log-loss plateau from 0.50-0.60 is flat, so landing on
+# 0.50 executes the rule without chasing the noise-floor minimum.
 CALIBRATION_SHRINKAGE_UP = 1.00
-CALIBRATION_SHRINKAGE_DOWN = 0.30
+CALIBRATION_SHRINKAGE_DOWN = 0.50
 # Polymarket crypto taker fee coefficient. Actual fee per trade is
 # `size * FEE_RATE * p * (1 - p)` — peaks at p=0.50, zero at the extremes.
 # Fees are charged in shares on buys; worthless on losing side.
