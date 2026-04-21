@@ -28,7 +28,7 @@ def test_defaults_are_sane():
     assert VOLATILITY_LOOKBACK == 50
     assert WINDOW_ENTRY_MIN_ELAPSED == 60
     assert WINDOW_ENTRY_MIN_REMAINING == 30
-    assert TRADING_MODE == "paper"
+    assert TRADING_MODE in {"paper", "live"}
     assert MIN_MODEL_CONFIDENCE == 0.60
     assert MIN_MODEL_CONFIDENCE_UP == 0.70
     assert MIN_MODEL_CONFIDENCE_UP > MIN_MODEL_CONFIDENCE

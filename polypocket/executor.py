@@ -54,6 +54,56 @@ class LiveOrderClient(Protocol):
     ) -> FillResult: ...
     def get_usdc_balance(self) -> float: ...
     def get_settlement_info(self, order_id: str) -> SettlementInfo: ...
+    def get_order_status(self, order_id: str) -> dict: ...
+
+
+def reconcile_recovered_trade(
+    db_path: str,
+    trade: dict,
+    client: LiveOrderClient | None,
+) -> str:
+    """Query CLOB for a recovered trade's order status and reconcile local DB.
+
+    Called only in live mode during startup recovery. Returns the final local
+    status: "open" (resume into _open_trade) or "rejected" (window consumed,
+    no position to resume). On any uncertainty (no order id, no client,
+    CLOB error, unknown status, resting order) returns the existing local
+    status unchanged and writes nothing, preserving today's recovery
+    behavior when CLOB evidence isn't available.
+    """
+    current_status = trade["status"]
+    order_id = trade.get("external_order_id")
+    if not order_id or client is None:
+        return current_status
+
+    try:
+        resp = client.get_order_status(order_id)
+    except Exception as exc:
+        log.warning(
+            "reconcile: get_order_status failed for trade %s order %s: %s",
+            trade["id"], order_id, exc,
+        )
+        return current_status
+
+    if not resp:
+        return current_status
+
+    clob_status = str(resp.get("status", "")).strip().lower()
+
+    if clob_status == "matched":
+        if current_status != "open":
+            update_trade(db_path, trade["id"], outcome=None, pnl=None, status="open")
+        return "open"
+
+    if clob_status in {"canceled", "cancelled", "unmatched"}:
+        update_trade(db_path, trade["id"], outcome=None, pnl=None, status="rejected")
+        return "rejected"
+
+    log.warning(
+        "reconcile: unexpected CLOB status %r for trade %s order %s; keeping local %r",
+        clob_status, trade["id"], order_id, current_status,
+    )
+    return current_status
 
 
 def _window_consumed_result(db_path: str, window_slug: str) -> TradeResult:

@@ -10,6 +10,7 @@ from polypocket.executor import (
     TradeResult,
     execute_paper_trade,
     execute_live_trade,
+    reconcile_recovered_trade,
     settle_live_trade,
 )
 from polypocket.ledger import (
@@ -550,4 +551,107 @@ def test_live_trade_client_error_marks_trade_rejected():
     assert "network" in result.error
     trade = find_trade_by_window_slug(db_path, "btc-5m-err")
     assert trade["status"] == "rejected"
+    os.unlink(db_path)
+
+
+def _seed_reserved_trade(db_path, window_slug, order_id=None):
+    """Seed a reserved live trade, optionally with an external_order_id."""
+    trade_id = persist_trade(
+        db_path=db_path,
+        window_slug=window_slug,
+        side="up",
+        entry_price=0.55,
+        size=10.0,
+        fees=0.0,
+        model_p_up=0.7,
+        market_p_up=0.55,
+        edge=0.15,
+        outcome=None,
+        pnl=None,
+        status="reserved",
+    )
+    if order_id is not None:
+        update_trade(db_path, trade_id, outcome=None, pnl=None, status="reserved",
+                     external_order_id=order_id)
+    return trade_id
+
+
+def test_reconcile_matched_marks_trade_open():
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_reserved_trade(db_path, "btc-5m-rec-matched", order_id="0xabc")
+    trade = find_trade_by_window_slug(db_path, "btc-5m-rec-matched")
+
+    client = Mock()
+    client.get_order_status.return_value = {"status": "MATCHED"}
+
+    result = reconcile_recovered_trade(db_path, trade, client)
+
+    assert result == "open"
+    assert find_trade_by_window_slug(db_path, "btc-5m-rec-matched")["status"] == "open"
+    os.unlink(db_path)
+
+
+def test_reconcile_canceled_marks_trade_rejected():
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_reserved_trade(db_path, "btc-5m-rec-canceled", order_id="0xabc")
+    trade = find_trade_by_window_slug(db_path, "btc-5m-rec-canceled")
+
+    client = Mock()
+    client.get_order_status.return_value = {"status": "CANCELED"}
+
+    result = reconcile_recovered_trade(db_path, trade, client)
+
+    assert result == "rejected"
+    assert find_trade_by_window_slug(db_path, "btc-5m-rec-canceled")["status"] == "rejected"
+    os.unlink(db_path)
+
+
+def test_reconcile_unmatched_marks_trade_rejected():
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_reserved_trade(db_path, "btc-5m-rec-unmatched", order_id="0xabc")
+    trade = find_trade_by_window_slug(db_path, "btc-5m-rec-unmatched")
+
+    client = Mock()
+    client.get_order_status.return_value = {"status": "UNMATCHED"}
+
+    result = reconcile_recovered_trade(db_path, trade, client)
+
+    assert result == "rejected"
+    assert find_trade_by_window_slug(db_path, "btc-5m-rec-unmatched")["status"] == "rejected"
+    os.unlink(db_path)
+
+
+def test_reconcile_without_external_order_id_is_noop():
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_reserved_trade(db_path, "btc-5m-rec-noid", order_id=None)
+    trade = find_trade_by_window_slug(db_path, "btc-5m-rec-noid")
+    assert trade["external_order_id"] is None
+
+    client = Mock()
+
+    result = reconcile_recovered_trade(db_path, trade, client)
+
+    assert result == "reserved"
+    client.get_order_status.assert_not_called()
+    assert find_trade_by_window_slug(db_path, "btc-5m-rec-noid")["status"] == "reserved"
+    os.unlink(db_path)
+
+
+def test_reconcile_clob_error_preserves_local_status():
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_reserved_trade(db_path, "btc-5m-rec-err", order_id="0xabc")
+    trade = find_trade_by_window_slug(db_path, "btc-5m-rec-err")
+
+    client = Mock()
+    client.get_order_status.side_effect = Exception("boom")
+
+    result = reconcile_recovered_trade(db_path, trade, client)
+
+    assert result == "reserved"
+    assert find_trade_by_window_slug(db_path, "btc-5m-rec-err")["status"] == "reserved"
     os.unlink(db_path)

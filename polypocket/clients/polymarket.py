@@ -148,6 +148,8 @@ class PolymarketClient:
         return float(resp.get("balance", 0.0)) / 1_000_000
 
     def get_order_status(self, order_id: str) -> dict:
+        if self._dry_run or order_id == "DRY-RUN":
+            return {}
         return self._client.get_order(order_id)
 
     def get_settlement_info(self, order_id: str) -> SettlementInfo:

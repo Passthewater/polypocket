@@ -25,6 +25,7 @@ from polypocket.executor import (
     TradeResult,
     execute_live_trade,
     execute_paper_trade,
+    reconcile_recovered_trade,
     settle_live_trade,
     settle_paper_trade,
 )
@@ -160,23 +161,35 @@ class Bot:
             if TRADING_MODE == "live":
                 recoverable_statuses.add("reserved")
             if recovered_trade is not None and recovered_trade["status"] in recoverable_statuses:
+                final_status = recovered_trade["status"]
+                if TRADING_MODE == "live" and recovered_trade.get("external_order_id"):
+                    final_status = reconcile_recovered_trade(
+                        self.db_path, recovered_trade, self.live_order_client,
+                    )
+
                 self._window_traded = True
-                self.stats["execution_status"] = "recovery"
-                self._open_trade = {
-                    "trade_id": recovered_trade["id"],
-                    "side": recovered_trade["side"],
-                    "entry_price": recovered_trade["entry_price"],
-                    "size": recovered_trade["size"],
-                    "mode": TRADING_MODE,
-                    "status": recovered_trade["status"],
-                    "external_order_id": recovered_trade.get("external_order_id"),
-                }
-                self.stats["position"] = self._format_position(self._open_trade)
                 # Remove from pending list to avoid double settlement
                 self._pending_settlements = [
                     p for p in self._pending_settlements
                     if p["trade_id"] != recovered_trade["id"]
                 ]
+
+                if final_status == "rejected":
+                    # CLOB says the order never matched — window consumed, no position.
+                    self.stats["execution_status"] = "rejected-on-recovery"
+                    self._open_trade = None
+                else:
+                    self.stats["execution_status"] = "recovery"
+                    self._open_trade = {
+                        "trade_id": recovered_trade["id"],
+                        "side": recovered_trade["side"],
+                        "entry_price": recovered_trade["entry_price"],
+                        "size": recovered_trade["size"],
+                        "mode": TRADING_MODE,
+                        "status": "open",
+                        "external_order_id": recovered_trade.get("external_order_id"),
+                    }
+                    self.stats["position"] = self._format_position(self._open_trade)
 
             if window.price_to_beat is not None:
                 self._ptb_provisional = False

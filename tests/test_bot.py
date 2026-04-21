@@ -44,6 +44,7 @@ async def test_bot_updates_stats_with_price_to_beat(tmp_path: Path):
 async def test_bot_executes_once_per_window(tmp_path: Path, monkeypatch):
     from polypocket.bot import Bot
 
+    monkeypatch.setattr("polypocket.bot.TRADING_MODE", "paper")
     db_path = tmp_path / "bot.db"
     init_db(str(db_path))
 
@@ -356,6 +357,124 @@ async def test_bot_live_mode_recovers_reserved_trade_and_prevents_reentry(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_bot_live_recovery_reconciles_matched_to_open(tmp_path: Path, monkeypatch):
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+    from polypocket.ledger import update_trade
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    trade_id = log_trade(
+        db_path=str(db_path),
+        window_slug="btc-updown-5m-rec-matched",
+        side="up",
+        entry_price=0.55,
+        size=10.0,
+        fees=0.0,
+        model_p_up=0.7,
+        market_p_up=0.55,
+        edge=0.15,
+        outcome=None,
+        pnl=None,
+        status="reserved",
+    )
+    update_trade(str(db_path), trade_id, outcome=None, pnl=None, status="reserved",
+                 external_order_id="0xabc")
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+    execute_mock = Mock(return_value=TradeResult(success=True, trade_id=999, pnl=None))
+    monkeypatch.setattr(bot_module, "execute_live_trade", execute_mock)
+
+    live_order_client = Mock()
+    live_order_client.get_order_status.return_value = {"status": "MATCHED"}
+
+    bot = Bot(db_path=str(db_path), live_order_client=live_order_client)
+    bot.binance.latest_price = 84000.0
+    bot.signal_engine.evaluate = Mock(return_value=None)
+    bot.risk.check = lambda: (True, "")
+
+    active_window = Window(
+        condition_id="rec-matched",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-rec-matched",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(active_window, "up")
+
+    assert bot._open_trade["trade_id"] == trade_id
+    assert bot._window_traded is True
+    assert bot.stats["execution_status"] == "recovery"
+    execute_mock.assert_not_called()
+    assert find_trade_by_window_slug(str(db_path), "btc-updown-5m-rec-matched")["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_bot_live_recovery_reconciles_canceled_to_rejected(tmp_path: Path, monkeypatch):
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+    from polypocket.ledger import update_trade
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    trade_id = log_trade(
+        db_path=str(db_path),
+        window_slug="btc-updown-5m-rec-canceled",
+        side="up",
+        entry_price=0.55,
+        size=10.0,
+        fees=0.0,
+        model_p_up=0.7,
+        market_p_up=0.55,
+        edge=0.15,
+        outcome=None,
+        pnl=None,
+        status="reserved",
+    )
+    update_trade(str(db_path), trade_id, outcome=None, pnl=None, status="reserved",
+                 external_order_id="0xabc")
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+    execute_mock = Mock(return_value=TradeResult(success=True, trade_id=999, pnl=None))
+    monkeypatch.setattr(bot_module, "execute_live_trade", execute_mock)
+
+    live_order_client = Mock()
+    live_order_client.get_order_status.return_value = {"status": "CANCELED"}
+
+    bot = Bot(db_path=str(db_path), live_order_client=live_order_client)
+    bot.binance.latest_price = 84000.0
+    bot.signal_engine.evaluate = Mock(return_value=None)
+    bot.risk.check = lambda: (True, "")
+
+    active_window = Window(
+        condition_id="rec-canceled",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-rec-canceled",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(active_window, "up")
+
+    assert bot._open_trade is None
+    assert bot._window_traded is True
+    assert bot.stats["execution_status"] == "rejected-on-recovery"
+    execute_mock.assert_not_called()
+    assert find_trade_by_window_slug(str(db_path), "btc-updown-5m-rec-canceled")["status"] == "rejected"
+
+
+@pytest.mark.asyncio
 async def test_bot_live_settle_uses_clob_settlement_info_for_real_pnl(
     tmp_path: Path, monkeypatch
 ):
@@ -646,6 +765,7 @@ async def test_bot_emits_open_snapshot_on_new_window(tmp_path: Path):
 async def test_bot_emits_decision_snapshot_on_trade(tmp_path: Path, monkeypatch):
     from polypocket.bot import Bot
 
+    monkeypatch.setattr("polypocket.bot.TRADING_MODE", "paper")
     db_path = tmp_path / "bot.db"
     init_db(str(db_path))
 
@@ -691,6 +811,7 @@ async def test_bot_emits_close_snapshot_on_settlement(tmp_path: Path, monkeypatc
     import polypocket.bot as bot_module
     from polypocket.bot import Bot
 
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "paper")
     db_path = tmp_path / "bot.db"
     init_db(str(db_path))
 
@@ -807,6 +928,7 @@ async def test_full_window_lifecycle_produces_three_snapshots(tmp_path: Path, mo
     import polypocket.bot as bot_module
     from polypocket.bot import Bot
 
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "paper")
     db_path = tmp_path / "bot.db"
     init_db(str(db_path))
 
