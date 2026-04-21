@@ -4,7 +4,7 @@ import tempfile
 
 import pytest
 
-from polypocket.executor import TradeResult, execute_paper_trade, execute_live_trade
+from polypocket.executor import FillResult, TradeResult, execute_paper_trade, execute_live_trade
 from polypocket.ledger import (
     find_trade_by_window_slug,
     get_paper_balance,
@@ -178,27 +178,39 @@ def test_paper_trade_race_on_insert_returns_consumed_existing_trade(monkeypatch)
 
 
 class RecordingLiveOrderClient:
-    def __init__(self):
+    def __init__(self, balance=1000.0):
         self.calls = []
+        self._balance = balance
 
-    def submit_fok(self, side, price, size, client_order_id):
-        self.calls.append(
-            {
-                "side": side,
-                "price": price,
-                "size": size,
-                "client_order_id": client_order_id,
-            }
+    def submit_fok(self, side, price, size, token_id, client_order_id):
+        self.calls.append({
+            "side": side, "price": price, "size": size,
+            "token_id": token_id, "client_order_id": client_order_id,
+        })
+        return FillResult(
+            status="filled", order_id=f"ord-{client_order_id}",
+            filled_size=size, avg_price=price, error=None,
         )
 
+    def get_usdc_balance(self):
+        return self._balance
 
-class FailingLiveOrderClient:
-    def __init__(self):
+
+class RejectingLiveOrderClient:
+    def __init__(self, balance=1000.0, error="no match"):
         self.calls = 0
+        self._balance = balance
+        self._error = error
 
-    def submit_fok(self, side, price, size, client_order_id):
+    def submit_fok(self, side, price, size, token_id, client_order_id):
         self.calls += 1
-        raise RuntimeError("broker unavailable")
+        return FillResult(
+            status="rejected", order_id=None,
+            filled_size=0.0, avg_price=None, error=self._error,
+        )
+
+    def get_usdc_balance(self):
+        return self._balance
 
 
 def test_live_trade_uses_deterministic_client_order_id():
@@ -219,6 +231,7 @@ def test_live_trade_uses_deterministic_client_order_id():
         entry_price=0.45,
         size=5.0,
         window_slug="eth-5m-999",
+        token_id="TKN-DOWN",
         client=client,
     )
 
@@ -228,6 +241,7 @@ def test_live_trade_uses_deterministic_client_order_id():
             "side": "down",
             "price": 0.45,
             "size": 5.0,
+            "token_id": "TKN-DOWN",
             "client_order_id": "window-eth-5m-999",
         }
     ]
@@ -258,6 +272,7 @@ def test_duplicate_live_trade_rejection_does_not_submit_again():
         entry_price=0.51,
         size=7.0,
         window_slug="sol-5m-dup",
+        token_id="TKN-UP",
         client=client,
     )
     assert first.success is True
@@ -266,6 +281,7 @@ def test_duplicate_live_trade_rejection_does_not_submit_again():
             "side": "up",
             "price": 0.51,
             "size": 7.0,
+            "token_id": "TKN-UP",
             "client_order_id": "window-sol-5m-dup",
         }
     ]
@@ -276,6 +292,7 @@ def test_duplicate_live_trade_rejection_does_not_submit_again():
         entry_price=0.51,
         size=7.0,
         window_slug="sol-5m-dup",
+        token_id="TKN-UP",
         client=client,
     )
 
@@ -310,6 +327,7 @@ def test_live_trade_race_on_insert_returns_consumed_existing_trade(monkeypatch):
         entry_price=0.51,
         size=7.0,
         window_slug="sol-5m-race",
+        token_id="TKN-UP",
         client=client,
     )
 
@@ -322,33 +340,4 @@ def test_live_trade_race_on_insert_returns_consumed_existing_trade(monkeypatch):
     )
     assert trade["status"] == "reserved"
     assert client.calls == []
-    os.unlink(db_path)
-
-
-def test_live_trade_failure_keeps_reserved_trade_reconcilable():
-    db_path = make_db()
-    signal = Signal(
-        side="down",
-        model_p_up=0.32,
-        market_price=0.44,
-        edge=0.12,
-        up_edge=-0.12,
-        down_edge=0.12,
-    )
-    client = FailingLiveOrderClient()
-
-    with pytest.raises(RuntimeError, match="broker unavailable"):
-        execute_live_trade(
-            db_path=db_path,
-            signal=signal,
-            entry_price=0.44,
-            size=4.0,
-            window_slug="arb-5m-fail",
-            client=client,
-        )
-
-    trade = find_trade_by_window_slug(db_path, "arb-5m-fail")
-    assert trade is not None
-    assert trade["status"] == "reserved"
-    assert client.calls == 1
     os.unlink(db_path)

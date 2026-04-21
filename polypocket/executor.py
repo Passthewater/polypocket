@@ -3,7 +3,7 @@
 import logging
 import sqlite3
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from polypocket.config import fee_shares
 from polypocket.ledger import (
@@ -28,9 +28,21 @@ class TradeResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class FillResult:
+    status: Literal["filled", "rejected", "error"]
+    order_id: str | None
+    filled_size: float
+    avg_price: float | None
+    error: str | None
+
+
 class LiveOrderClient(Protocol):
-    def submit_fok(self, side: str, price: float, size: float, client_order_id: str) -> None:
-        ...
+    def submit_fok(
+        self, side: str, price: float, size: float,
+        token_id: str, client_order_id: str,
+    ) -> FillResult: ...
+    def get_usdc_balance(self) -> float: ...
 
 
 def _window_client_order_id(window_slug: str) -> str:
@@ -124,6 +136,7 @@ def execute_live_trade(
     entry_price: float,
     size: float,
     window_slug: str,
+    token_id: str,
     client: LiveOrderClient,
 ) -> TradeResult:
     existing_trade = find_trade_by_window_slug(db_path, window_slug)
@@ -156,6 +169,7 @@ def execute_live_trade(
         side=signal.side,
         price=entry_price,
         size=size,
+        token_id=token_id,
         client_order_id=client_order_id,
     )
     update_trade_status(db_path, trade_id, "open")
