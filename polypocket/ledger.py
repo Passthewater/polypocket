@@ -68,6 +68,12 @@ def init_db(db_path: str) -> None:
                 ON trades(window_slug)
                 """
             )
+            # Idempotent column adds for live trading (nullable — paper rows remain valid).
+            existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
+            if "external_order_id" not in existing_cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN external_order_id TEXT")
+            if "error" not in existing_cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN error TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS window_snapshots (
@@ -221,11 +227,19 @@ def update_trade(
     outcome: str | None,
     pnl: float | None,
     status: str,
+    external_order_id: str | None = None,
+    error: str | None = None,
 ) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute(
-            "UPDATE trades SET outcome = ?, pnl = ?, status = ? WHERE id = ?",
-            (outcome, pnl, status, trade_id),
+            """
+            UPDATE trades
+            SET outcome = ?, pnl = ?, status = ?,
+                external_order_id = COALESCE(?, external_order_id),
+                error = COALESCE(?, error)
+            WHERE id = ?
+            """,
+            (outcome, pnl, status, external_order_id, error, trade_id),
         )
         conn.commit()
 

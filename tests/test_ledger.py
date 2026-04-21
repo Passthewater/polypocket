@@ -18,6 +18,7 @@ from polypocket.ledger import (
     init_db,
     log_snapshot,
     log_trade,
+    update_trade,
 )
 
 
@@ -369,4 +370,56 @@ def test_log_snapshot_close_with_outcome():
     assert rows[0]["final_price"] == 84400.0
     assert rows[0]["skip_reason"] == "no-edge"
     assert rows[0]["trade_fired"] == 0
+    os.unlink(db_path)
+
+
+def test_init_db_adds_external_order_id_and_error_columns():
+    db_path = make_db()
+    conn = sqlite3.connect(db_path)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
+    conn.close()
+    assert "external_order_id" in cols
+    assert "error" in cols
+    os.unlink(db_path)
+
+
+def test_init_db_is_idempotent_on_existing_db():
+    db_path = make_db()
+    init_db(db_path)  # second call must not raise
+    conn = sqlite3.connect(db_path)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
+    conn.close()
+    assert "external_order_id" in cols
+    os.unlink(db_path)
+
+
+def test_update_trade_writes_external_order_id_and_error():
+    db_path = make_db()
+    trade_id = log_trade(
+        db_path=db_path,
+        window_slug="btc-5m-1",
+        side="up",
+        entry_price=0.55,
+        size=10.0,
+        fees=0.01,
+        model_p_up=0.7,
+        market_p_up=0.55,
+        edge=0.15,
+        outcome=None,
+        pnl=None,
+        status="reserved",
+    )
+    update_trade(
+        db_path=db_path,
+        trade_id=trade_id,
+        outcome=None,
+        pnl=None,
+        status="rejected",
+        external_order_id="abc123",
+        error="no match",
+    )
+    row = find_trade_by_window_slug(db_path, "btc-5m-1")
+    assert row["external_order_id"] == "abc123"
+    assert row["error"] == "no match"
+    assert row["status"] == "rejected"
     os.unlink(db_path)
