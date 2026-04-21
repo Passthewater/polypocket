@@ -58,8 +58,26 @@ def test_submit_fok_passes_market_fee_rate(mock_clob):
     args = inst.create_market_order.call_args.args[0]
     assert args.fee_rate_bps == 1000
     assert args.token_id == "TKN-UP"
+    # amount = USDC budget at the target price (2-dp precision rule)
     assert args.amount == pytest.approx(round(7.0 * 0.51, 2))
-    assert args.price == 0.51
+    # price = limit (max) price, with FOK_SLIPPAGE_TICKS buffer so taker
+    # can sweep thin levels instead of killing at the quoted ask
+    from polypocket.config import FOK_SLIPPAGE_TICKS
+    assert args.price == pytest.approx(round(0.51 + FOK_SLIPPAGE_TICKS * 0.01, 2))
+
+
+def test_submit_fok_limit_price_capped_at_99c(mock_clob):
+    """Limit price must never exceed $0.99 — Polymarket rejects price==1.0."""
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {"success": True, "status": "matched", "orderID": "x"}
+    inst.get_order.return_value = {"status": "matched", "size_matched": "1.0"}
+
+    client.submit_fok(side="up", price=0.98, size=1.0,
+                      token_id="TKN-UP", condition_id="0xCOND")
+
+    args = inst.create_market_order.call_args.args[0]
+    assert args.price <= 0.99
 
 
 def test_submit_fok_caches_market_fee(mock_clob):

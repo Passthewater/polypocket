@@ -80,6 +80,12 @@ BOOK_MAX_TOTAL_ASK = 1.02
 # --- Live trading ---
 LIVE_DB_PATH = "live_trades.db"
 LIVE_MAX_TRADES_PER_SESSION = int(os.getenv("LIVE_MAX_TRADES_PER_SESSION", "10"))
+# FOK limit = best_ask + this many ticks. 0 means "fill only at quoted ask",
+# which kills whenever the book has less depth than our size at that exact
+# level — common on 5m BTC books. 2 ticks (+$0.02) lets the taker sweep one
+# or two thin levels up without giving back meaningful edge (signals require
+# ≥3% edge, ≥10% for DOWN).
+FOK_SLIPPAGE_TICKS = int(os.getenv("FOK_SLIPPAGE_TICKS", "2"))
 
 POLYMARKET_PROXY_ADDRESS = os.getenv("PROXY_ADDRESS", "").strip()
 CLOB_API_KEY = os.getenv("CLOB_API_KEY", "").strip()

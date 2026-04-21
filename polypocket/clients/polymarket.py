@@ -11,6 +11,7 @@ from py_clob_client.clob_types import (
     OrderType,
 )
 
+from polypocket.config import FOK_SLIPPAGE_TICKS
 from polypocket.executor import FillResult
 
 log = logging.getLogger(__name__)
@@ -89,10 +90,11 @@ class PolymarketClient:
         # 0.36 = 10.0008) and is rejected with `invalid amounts`.
         # Market-order path computes makerAmount = round_down(amount, 2)
         # directly, which the server accepts.
+        limit_price = round(min(0.99, price + FOK_SLIPPAGE_TICKS * 0.01), 2)
         args = MarketOrderArgs(
             token_id=token_id,
-            amount=round(size * price, 2),  # USDC to spend, 2dp
-            price=price,                    # limit (max) price
+            amount=round(size * price, 2),  # USDC budget at target price
+            price=limit_price,              # allow sweeping up to +N ticks
             fee_rate_bps=fee_rate_bps,
         )
         try:
