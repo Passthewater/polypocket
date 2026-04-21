@@ -5,6 +5,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
@@ -53,14 +54,14 @@ class StatusPanel(Static):
         if preview_side is not None and preview_market_price is not None and edge is not None:
             lines.append(f"Preview: {preview_side.upper()} @ {preview_market_price:.1%}")
         lines.append(f"Edge: {edge:+.1%}" if edge is not None else "Edge: --")
-        lines.append(f"Quote Status: {quote_status}" if quote_status else "Quote Status: --")
-        lines.append(f"Execution Status: {execution_status}" if execution_status else "Execution Status: --")
+        lines.append(f"Quote Status: {escape(str(quote_status))}" if quote_status else "Quote Status: --")
+        lines.append(f"Execution Status: {escape(str(execution_status))}" if execution_status else "Execution Status: --")
         lines.append(f"Volatility: {sigma:.4%}" if sigma else "Volatility: --")
         lines.append("")
         lines.append(f"Paper Balance: ${balance:,.2f}")
         lines.append(f"Daily P&L: ${daily:+,.2f}")
         if position:
-            lines.append(f"Position: {position}")
+            lines.append(f"Position: {escape(str(position))}")
         self.update("\n".join(lines))
 
 
@@ -150,9 +151,9 @@ class PolypocketApp(App):
         Binding("r", "report", "Report"),
     ]
 
-    def __init__(self):
+    def __init__(self, bot: Bot | None = None):
         super().__init__()
-        self.bot = Bot()
+        self.bot = bot if bot is not None else Bot()
         self._session_start_time = datetime.now()
         self._session_start_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         self._bot_ready = False
@@ -166,7 +167,10 @@ class PolypocketApp(App):
         )
         yield TradesPanel(id="trades")
         yield StatsBar(id="stats-bar")
-        yield RichLog(id="log", highlight=True, markup=True)
+        # markup=False: log lines may contain user-controlled strings (CLOB
+        # error payloads like "{'error': 'invalid fee rate (0), ...}") that
+        # would otherwise be parsed as Rich markup and crash every refresh.
+        yield RichLog(id="log", highlight=True, markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
