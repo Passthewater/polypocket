@@ -15,11 +15,11 @@ This design covers **blockers #1, #2, #3, #6** from issue #3:
 
 **Deferred to follow-up issues** (filed at commit time):
 
-- **A** — Live PnL / payout reconciliation (`settle_live_trade` queries Polymarket).
-- **B** — Startup order-status reconciliation against CLOB.
-- **C** — `RiskManager` consumes live PnL alongside paper PnL.
-- **D** — Integration test matrix (fill / reject / partial-fill / restart-mid-order).
-- **E** — Remove `LIVE_MAX_TRADES_PER_SESSION` stopgap once A+C land.
+- **A** — Live PnL / payout reconciliation (`settle_live_trade` queries Polymarket) → #4
+- **B** — Startup order-status reconciliation against CLOB → #5
+- **C** — `RiskManager` consumes live PnL alongside paper PnL → #6
+- **D** — Integration test matrix (fill / reject / partial-fill / restart-mid-order) → #7
+- **E** — Remove `LIVE_MAX_TRADES_PER_SESSION` stopgap once A+C land → #8
 
 Rationale for the split: shipping #1-3 + #6 in a reviewable chunk is lower-risk than a sprawling PR that also wires reconciliation. The first live run is manually supervised either way.
 
@@ -202,10 +202,10 @@ Integration test matrix covering fill / reject / partial-fill / restart-mid-orde
 
 ## Follow-up issues filed at commit time
 
-- **A — Live PnL reconciliation.** `settle_live_trade` queries Polymarket for actual payout / fees / shares; writes real `pnl`.
-- **B — Startup order reconciliation.** On recovering `reserved`/`open` rows, call `client.get_order_status(external_order_id)` and resolve before resuming.
-- **C — RiskManager consumes live PnL.** Unify `MAX_DAILY_LOSS` gate across paper + live.
-- **D — Integration test matrix.** Mocked-CLOB coverage: fill, reject, partial-fill, restart-mid-order.
-- **E — Remove `LIVE_MAX_TRADES_PER_SESSION` stopgap** once A + C land.
+- **A — Live PnL reconciliation** (#4). `settle_live_trade` queries Polymarket for actual payout / fees / shares; writes real `pnl`.
+- **B — Startup order reconciliation** (#5). On recovering `reserved`/`open` rows, call `client.get_order_status(external_order_id)` and resolve before resuming.
+- **C — RiskManager consumes live PnL** (#6). Unify `MAX_DAILY_LOSS` gate across paper + live.
+- **D — Integration test matrix** (#7). Mocked-CLOB coverage: fill, reject, partial-fill, restart-mid-order.
+- **E — Remove `LIVE_MAX_TRADES_PER_SESSION` stopgap** (#8) once A + C land.
 
 Each references issue #3 and links back to this doc.
