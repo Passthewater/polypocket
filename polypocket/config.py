@@ -76,3 +76,13 @@ POLYMARKET_HOST = "https://clob.polymarket.com"
 POLYMARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CHAIN_ID = 137
 BOOK_MAX_TOTAL_ASK = 1.02
+
+# --- Live trading ---
+LIVE_DB_PATH = "live_trades.db"
+LIVE_MAX_TRADES_PER_SESSION = int(os.getenv("LIVE_MAX_TRADES_PER_SESSION", "10"))
+
+POLYMARKET_PROXY_ADDRESS = os.getenv("PROXY_ADDRESS", "").strip()
+CLOB_API_KEY = os.getenv("CLOB_API_KEY", "").strip()
+CLOB_SECRET = os.getenv("CLOB_SECRET", "").strip()
+CLOB_PASSPHRASE = os.getenv("CLOB_PASSPHRASE", "").strip()
+PRIVATE_KEY = os.getenv("PRIVATE_KEY", "").strip()
