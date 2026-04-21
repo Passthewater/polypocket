@@ -25,6 +25,11 @@ log = logging.getLogger(__name__)
 POLY_PROXY_SIG_TYPE = 1
 
 
+def fok_limit_price(price: float) -> float:
+    """FOK limit price: best ask + FOK_SLIPPAGE_TICKS, capped at $0.99."""
+    return round(min(0.99, price + FOK_SLIPPAGE_TICKS * 0.01), 2)
+
+
 class PolymarketClient:
     """Concrete LiveOrderClient for Polymarket's CLOB using L2 proxy signing."""
 
@@ -90,7 +95,7 @@ class PolymarketClient:
         # 0.36 = 10.0008) and is rejected with `invalid amounts`.
         # Market-order path computes makerAmount = round_down(amount, 2)
         # directly, which the server accepts.
-        limit_price = round(min(0.99, price + FOK_SLIPPAGE_TICKS * 0.01), 2)
+        limit_price = fok_limit_price(price)
         args = MarketOrderArgs(
             token_id=token_id,
             amount=round(size * price, 2),  # USDC budget at target price

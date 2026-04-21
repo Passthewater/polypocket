@@ -82,10 +82,13 @@ LIVE_DB_PATH = "live_trades.db"
 LIVE_MAX_TRADES_PER_SESSION = int(os.getenv("LIVE_MAX_TRADES_PER_SESSION", "10"))
 # FOK limit = best_ask + this many ticks. 0 means "fill only at quoted ask",
 # which kills whenever the book has less depth than our size at that exact
-# level — common on 5m BTC books. 2 ticks (+$0.02) lets the taker sweep one
-# or two thin levels up without giving back meaningful edge (signals require
-# ≥3% edge, ≥10% for DOWN).
-FOK_SLIPPAGE_TICKS = int(os.getenv("FOK_SLIPPAGE_TICKS", "2"))
+# level — common on 5m BTC books. 3 ticks matches typical cross-level move
+# during 200–500ms signal→post latency on 5m BTC books; the depth check in
+# bot.py ensures the extra tick stays affordable.
+FOK_SLIPPAGE_TICKS = int(os.getenv("FOK_SLIPPAGE_TICKS", "3"))
+# Max age of the last WS book event before a signal is considered unsafe to
+# trade on. Covers WS reconnect gaps and silent book stalls.
+MAX_BOOK_AGE_S = float(os.getenv("MAX_BOOK_AGE_S", "3.0"))
 
 POLYMARKET_PROXY_ADDRESS = os.getenv("PROXY_ADDRESS", "").strip()
 CLOB_API_KEY = os.getenv("CLOB_API_KEY", "").strip()

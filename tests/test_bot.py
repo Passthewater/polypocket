@@ -739,6 +739,9 @@ async def test_live_mode_threads_up_token_id(tmp_path: Path, monkeypatch):
         price_to_beat=84198.0,
         up_ask=0.55,
         down_ask=0.45,
+        up_book=[{"price": 0.55, "size": 1000.0}],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
     )
 
     await bot._on_book_update(window, "up")
@@ -747,3 +750,140 @@ async def test_live_mode_threads_up_token_id(tmp_path: Path, monkeypatch):
     assert client.calls[0]["side"] == "up"
     assert client.calls[0]["token_id"] == "UP-TOKEN-ID"
     assert bot._live_trades_submitted == 1
+
+
+def _make_live_bot(tmp_path: Path, monkeypatch, client):
+    from polypocket.bot import Bot
+
+    monkeypatch.setattr("polypocket.bot.TRADING_MODE", "live")
+    db_path = tmp_path / "live.db"
+    init_db(str(db_path))
+    bot = Bot(db_path=str(db_path), live_order_client=client)
+    bot.binance.latest_price = 84350.0
+    bot.signal_engine.evaluate = lambda **kwargs: Signal(
+        side="up",
+        model_p_up=0.75,
+        market_price=0.55,
+        edge=0.20,
+        up_edge=0.20,
+        down_edge=-0.20,
+    )
+    bot.risk.check = lambda: (True, "")
+    return bot
+
+
+class _CapturingClient:
+    def __init__(self):
+        self.calls = []
+
+    def submit_fok(self, side, price, size, token_id, condition_id):
+        self.calls.append({"side": side, "size": size})
+        return FillResult(status="filled", order_id="x",
+                          filled_size=size, avg_price=price, error=None)
+
+    def get_usdc_balance(self):
+        return 1000.0
+
+
+@pytest.mark.asyncio
+async def test_bot_live_skips_when_book_stale(tmp_path: Path, monkeypatch):
+    """Staleness gate: book_updated_at older than MAX_BOOK_AGE_S -> skip."""
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="stale-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-stale",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[{"price": 0.55, "size": 1000.0}],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic() - 10.0,  # 10s old
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert client.calls == []
+    assert bot._window_skip_reason == "book-stale"
+
+
+@pytest.mark.asyncio
+async def test_bot_live_skips_when_book_age_none(tmp_path: Path, monkeypatch):
+    """No book event ever received -> skip (fail-closed)."""
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="none-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-none",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[{"price": 0.55, "size": 1000.0}],
+        book_updated_at=None,
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert client.calls == []
+    assert bot._window_skip_reason == "book-stale"
+
+
+@pytest.mark.asyncio
+async def test_bot_live_skips_when_book_too_thin(tmp_path: Path, monkeypatch):
+    """Depth gate: cumulative size at <= FOK limit price must cover 1.1x required."""
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    # At $0.55 entry with FOK_SLIPPAGE_TICKS=3, limit=$0.58.
+    # Book only has 3 shares total at <=$0.58 — far less than needed.
+    window = Window(
+        condition_id="thin-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-thin",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[
+            {"price": 0.55, "size": 2.0},
+            {"price": 0.56, "size": 1.0},
+            {"price": 0.70, "size": 1000.0},  # outside the limit band
+        ],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert client.calls == []
+    assert bot._window_skip_reason == "book-too-thin"
+
+
+@pytest.mark.asyncio
+async def test_bot_live_submits_when_book_deep_and_fresh(tmp_path: Path, monkeypatch):
+    """Sanity: gates are no-ops on a healthy book."""
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="ok-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-ok",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[{"price": 0.55, "size": 1000.0}],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert len(client.calls) == 1

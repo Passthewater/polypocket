@@ -37,6 +37,7 @@ class Window:
     down_ask_size: float | None = None
     up_book: list[dict] | None = None
     down_book: list[dict] | None = None
+    book_updated_at: float | None = None  # time.monotonic() of last book event
 
     @property
     def start_time(self) -> float:
@@ -431,6 +432,7 @@ async def subscribe_and_stream(
                             window.down_ask = parsed["best_ask"]
                             window.down_ask_size = parsed["best_ask_size"]
                             window.down_book = parsed["top_asks"]
+                        window.book_updated_at = time.monotonic()
 
                         if on_book_update is not None:
                             await on_book_update(window, side)

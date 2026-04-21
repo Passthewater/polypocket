@@ -9,6 +9,7 @@ from polypocket.config import (
     CALIBRATION_SHRINKAGE_UP,
     EDGE_FLOOR,
     EDGE_RANGE,
+    MAX_BOOK_AGE_S,
     MAX_POSITION_USDC,
     MIN_POSITION_USDC,
     PAPER_DB_PATH,
@@ -18,6 +19,7 @@ from polypocket.config import (
     VOLATILITY_LOOKBACK,
     effective_ask,
 )
+from polypocket.clients.polymarket import fok_limit_price
 from polypocket.executor import (
     LiveOrderClient,
     TradeResult,
@@ -366,6 +368,39 @@ class Bot:
         vol_scale = min(max((sigma - VOL_FLOOR) / VOL_RANGE, 0.0), 1.0)
         size_usdc = MIN_POSITION_USDC + (edge_scale * vol_scale) * (MAX_POSITION_USDC - MIN_POSITION_USDC)
         size = size_usdc / entry_price
+
+        # Staleness gate: refuse to trade on a book that hasn't ticked recently.
+        # Covers WS-reconnect gaps and silent stalls — without a fixed grace
+        # window that could expire mid-reconnect.
+        if TRADING_MODE != "paper":
+            age_ok = (
+                window.book_updated_at is not None
+                and time.monotonic() - window.book_updated_at <= MAX_BOOK_AGE_S
+            )
+            if not age_ok:
+                self._window_skip_reason = "book-stale"
+                log.warning(
+                    "Skipping signal: book age exceeds %.1fs (updated_at=%s)",
+                    MAX_BOOK_AGE_S, window.book_updated_at,
+                )
+                return
+
+            # Depth gate: cumulative ask size at ≤ FOK limit price must cover
+            # the requested shares with a 10% cushion for last-moment churn.
+            book = window.up_book if signal.side == "up" else window.down_book
+            limit = fok_limit_price(entry_price)
+            fillable = sum(
+                lvl["size"] for lvl in (book or []) if lvl["price"] <= limit + 1e-9
+            )
+            required = size * 1.1
+            if fillable < required:
+                self._window_skip_reason = "book-too-thin"
+                log.warning(
+                    "Skipping signal: need %.1f shares @ ≤$%.2f, book has %.1f",
+                    required, limit, fillable,
+                )
+                return
+
         raw_str = (
             f"raw={signal.model_p_up_raw * 100:.1f}%" if signal.model_p_up_raw is not None else "raw=n/a"
         )

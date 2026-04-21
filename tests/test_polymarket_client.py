@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from polypocket.clients.polymarket import PolymarketClient
+from polypocket.clients.polymarket import PolymarketClient, fok_limit_price
 from polypocket.executor import FillResult
 
 
@@ -178,3 +178,16 @@ def test_get_usdc_balance_handles_empty_wallet(mock_clob):
     inst.get_balance_allowance.return_value = {"balance": "0"}
 
     assert client.get_usdc_balance() == pytest.approx(0.0)
+
+
+def test_fok_limit_price_adds_slippage_ticks():
+    from polypocket.config import FOK_SLIPPAGE_TICKS
+    assert fok_limit_price(0.40) == pytest.approx(round(0.40 + FOK_SLIPPAGE_TICKS * 0.01, 2))
+    assert fok_limit_price(0.51) == pytest.approx(round(0.51 + FOK_SLIPPAGE_TICKS * 0.01, 2))
+
+
+def test_fok_limit_price_capped_at_99c():
+    """Polymarket rejects price >= 1.0; helper must cap."""
+    assert fok_limit_price(0.98) <= 0.99
+    assert fok_limit_price(0.99) == 0.99
+    assert fok_limit_price(1.00) == 0.99
