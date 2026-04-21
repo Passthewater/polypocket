@@ -46,8 +46,8 @@ def effective_ask(price: float) -> float:
     return price / (1.0 - FEE_RATE * price * (1.0 - price))
 
 # --- Position sizing ---
-MIN_POSITION_USDC = 5.0
-MAX_POSITION_USDC = 20.0
+MIN_POSITION_USDC = float(os.getenv("MIN_POSITION_USDC", "5.0"))
+MAX_POSITION_USDC = float(os.getenv("MAX_POSITION_USDC", "20.0"))
 VOL_FLOOR = 0.0005
 VOL_RANGE = 0.0005
 EDGE_FLOOR = 0.03
