@@ -79,7 +79,6 @@ BOOK_MAX_TOTAL_ASK = 1.02
 
 # --- Live trading ---
 LIVE_DB_PATH = "live_trades.db"
-LIVE_MAX_TRADES_PER_SESSION = int(os.getenv("LIVE_MAX_TRADES_PER_SESSION", "10"))
 # FOK limit = best_ask + this many ticks. 0 means "fill only at quoted ask",
 # which kills whenever the book has less depth than our size at that exact
 # level — common on 5m BTC books. 3 ticks matches typical cross-level move

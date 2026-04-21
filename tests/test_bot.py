@@ -1056,7 +1056,6 @@ async def test_live_mode_threads_up_token_id(tmp_path: Path, monkeypatch):
     assert len(client.calls) == 1
     assert client.calls[0]["side"] == "up"
     assert client.calls[0]["token_id"] == "UP-TOKEN-ID"
-    assert bot._live_trades_submitted == 1
 
 
 def _make_live_bot(tmp_path: Path, monkeypatch, client):

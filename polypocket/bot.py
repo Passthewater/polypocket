@@ -59,7 +59,6 @@ class Bot:
         self.risk = RiskManager(db_path=db_path)
         self.stop = asyncio.Event()
 
-        self._live_trades_submitted = 0
         self._current_window_id: str | None = None
         self._current_window: Window | None = None
         self._window_traded = False
@@ -464,16 +463,6 @@ class Bot:
             trade_fired=True,
         )
 
-        from polypocket.config import LIVE_MAX_TRADES_PER_SESSION
-        if TRADING_MODE == "live" and self._live_trades_submitted >= LIVE_MAX_TRADES_PER_SESSION:
-            log.warning(
-                "Live session cap reached (%d) — skipping window %s",
-                LIVE_MAX_TRADES_PER_SESSION, window.slug,
-            )
-            self._window_traded = True
-            self.stats["execution_status"] = "session-cap"
-            return
-
         if TRADING_MODE == "paper":
             result = execute_paper_trade(
                 db_path=self.db_path,
@@ -496,8 +485,6 @@ class Bot:
                 condition_id=window.condition_id,
                 client=self.live_order_client,
             )
-            if result.success:
-                self._live_trades_submitted += 1
 
         if not result.success and result.error == "window-already-consumed":
             self._window_traded = True
