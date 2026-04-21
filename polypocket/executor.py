@@ -143,6 +143,10 @@ def execute_live_trade(
     if existing_trade is not None:
         return _window_consumed_result(db_path, window_slug)
 
+    usdc_needed = entry_price * size
+    if client.get_usdc_balance() < usdc_needed:
+        return TradeResult(success=False, error="insufficient-balance")
+
     client_order_id = _window_client_order_id(window_slug)
     fee_sh = fee_shares(size, entry_price)
     try:
@@ -165,15 +169,36 @@ def execute_live_trade(
         if consumed.trade_id is not None:
             return consumed
         raise
-    client.submit_fok(
+
+    fill = client.submit_fok(
         side=signal.side,
         price=entry_price,
         size=size,
         token_id=token_id,
         client_order_id=client_order_id,
     )
-    update_trade_status(db_path, trade_id, "open")
-    return TradeResult(success=True, trade_id=trade_id, pnl=None)
+
+    if fill.status == "filled":
+        update_trade(
+            db_path, trade_id, outcome=None, pnl=None, status="open",
+            external_order_id=fill.order_id,
+        )
+        log.info(
+            "Live fill: %s %s @%.4f x%.2f token=%s order=%s",
+            window_slug, signal.side, entry_price, size, token_id, fill.order_id,
+        )
+        return TradeResult(success=True, trade_id=trade_id, pnl=None)
+
+    # rejected or error
+    update_trade(
+        db_path, trade_id, outcome=None, pnl=None, status="rejected",
+        error=fill.error,
+    )
+    log.warning(
+        "Live reject/error: %s %s @%.4f x%.2f: %s",
+        window_slug, signal.side, entry_price, size, fill.error,
+    )
+    return TradeResult(success=False, trade_id=trade_id, error=fill.error)
 
 
 def settle_paper_trade(

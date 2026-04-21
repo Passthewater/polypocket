@@ -341,3 +341,82 @@ def test_live_trade_race_on_insert_returns_consumed_existing_trade(monkeypatch):
     assert trade["status"] == "reserved"
     assert client.calls == []
     os.unlink(db_path)
+
+
+class InsufficientBalanceClient:
+    def submit_fok(self, **kwargs):
+        raise AssertionError("submit_fok must not be called when balance check fails")
+
+    def get_usdc_balance(self):
+        return 0.50
+
+
+def test_live_trade_insufficient_balance_writes_no_row():
+    db_path = make_db()
+    signal = Signal(side="up", model_p_up=0.72, market_price=0.51,
+                    edge=0.21, up_edge=0.21, down_edge=-0.21)
+    result = execute_live_trade(
+        db_path=db_path, signal=signal, entry_price=0.51, size=7.0,
+        window_slug="btc-5m-nb", token_id="TKN-UP",
+        client=InsufficientBalanceClient(),
+    )
+    assert result.success is False
+    assert result.error == "insufficient-balance"
+    assert find_trade_by_window_slug(db_path, "btc-5m-nb") is None
+    os.unlink(db_path)
+
+
+def test_live_trade_filled_writes_external_order_id():
+    db_path = make_db()
+    signal = Signal(side="up", model_p_up=0.72, market_price=0.51,
+                    edge=0.21, up_edge=0.21, down_edge=-0.21)
+    client = RecordingLiveOrderClient()
+    result = execute_live_trade(
+        db_path=db_path, signal=signal, entry_price=0.51, size=7.0,
+        window_slug="btc-5m-fill", token_id="TKN-UP", client=client,
+    )
+    assert result.success is True
+    trade = find_trade_by_window_slug(db_path, "btc-5m-fill")
+    assert trade["status"] == "open"
+    assert trade["external_order_id"] == "ord-window-btc-5m-fill"
+    os.unlink(db_path)
+
+
+def test_live_trade_rejected_marks_trade_rejected_with_error():
+    db_path = make_db()
+    signal = Signal(side="down", model_p_up=0.32, market_price=0.44,
+                    edge=0.12, up_edge=-0.12, down_edge=0.12)
+    client = RejectingLiveOrderClient(error="no match")
+    result = execute_live_trade(
+        db_path=db_path, signal=signal, entry_price=0.44, size=4.0,
+        window_slug="btc-5m-rej", token_id="TKN-DOWN", client=client,
+    )
+    assert result.success is False
+    assert result.error == "no match"
+    trade = find_trade_by_window_slug(db_path, "btc-5m-rej")
+    assert trade["status"] == "rejected"
+    assert trade["error"] == "no match"
+    assert trade["external_order_id"] is None
+    os.unlink(db_path)
+
+
+def test_live_trade_client_error_marks_trade_rejected():
+    class ErroringClient:
+        def submit_fok(self, **kwargs):
+            return FillResult(status="error", order_id=None, filled_size=0.0,
+                              avg_price=None, error="network: timeout")
+        def get_usdc_balance(self):
+            return 1000.0
+
+    db_path = make_db()
+    signal = Signal(side="up", model_p_up=0.72, market_price=0.51,
+                    edge=0.21, up_edge=0.21, down_edge=-0.21)
+    result = execute_live_trade(
+        db_path=db_path, signal=signal, entry_price=0.51, size=7.0,
+        window_slug="btc-5m-err", token_id="TKN-UP", client=ErroringClient(),
+    )
+    assert result.success is False
+    assert "network" in result.error
+    trade = find_trade_by_window_slug(db_path, "btc-5m-err")
+    assert trade["status"] == "rejected"
+    os.unlink(db_path)
