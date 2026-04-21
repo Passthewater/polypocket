@@ -85,6 +85,15 @@ LIVE_DB_PATH = "live_trades.db"
 # during 200–500ms signal→post latency on 5m BTC books; the depth check in
 # bot.py ensures the extra tick stays affordable.
 FOK_SLIPPAGE_TICKS = int(os.getenv("FOK_SLIPPAGE_TICKS", "3"))
+# Fraction of book depth (at <= FOK limit price) we ask for as our FOK
+# size. Leaves headroom for the book to thin between our depth read and
+# the signed order reaching the matcher. 0.9 = ask for at most 90% of
+# visible fillable size.
+DEPTH_CLAMP_BUFFER = float(os.getenv("DEPTH_CLAMP_BUFFER", "0.9"))
+# Minimum fraction of intended size a trade must be able to fill for us
+# to bother. If depth-clamped target_size < intended * MIN_FILL_RATIO,
+# skip the window with reason "book-too-thin".
+MIN_FILL_RATIO = float(os.getenv("MIN_FILL_RATIO", "0.5"))
 # Max age of the last WS book event before a signal is considered unsafe to
 # trade on. Covers WS reconnect gaps and silent book stalls.
 MAX_BOOK_AGE_S = float(os.getenv("MAX_BOOK_AGE_S", "3.0"))

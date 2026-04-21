@@ -53,3 +53,26 @@ def test_calibration_report_returns_string():
     assert isinstance(result, str)
     assert "Calibration Report" in result
     assert "Bucket" in result
+
+
+def test_depth_clamp_buffer_default():
+    import importlib, polypocket.config as cfg
+    importlib.reload(cfg)
+    assert cfg.DEPTH_CLAMP_BUFFER == 0.9
+
+def test_min_fill_ratio_default():
+    import importlib, polypocket.config as cfg
+    importlib.reload(cfg)
+    assert cfg.MIN_FILL_RATIO == 0.5
+
+def test_depth_clamp_buffer_env_override(monkeypatch):
+    monkeypatch.setenv("DEPTH_CLAMP_BUFFER", "0.75")
+    import importlib, polypocket.config as cfg
+    importlib.reload(cfg)
+    assert cfg.DEPTH_CLAMP_BUFFER == 0.75
+
+def test_min_fill_ratio_env_override(monkeypatch):
+    monkeypatch.setenv("MIN_FILL_RATIO", "0.25")
+    import importlib, polypocket.config as cfg
+    importlib.reload(cfg)
+    assert cfg.MIN_FILL_RATIO == 0.25
