@@ -7,10 +7,12 @@ import time
 from polypocket.config import (
     CALIBRATION_SHRINKAGE_DOWN,
     CALIBRATION_SHRINKAGE_UP,
+    DEPTH_CLAMP_BUFFER,
     EDGE_FLOOR,
     EDGE_RANGE,
     MAX_BOOK_AGE_S,
     MAX_POSITION_USDC,
+    MIN_FILL_RATIO,
     MIN_POSITION_USDC,
     PAPER_DB_PATH,
     TRADING_MODE,
@@ -419,21 +421,43 @@ class Bot:
                 )
                 return
 
-            # Depth gate: cumulative ask size at ≤ FOK limit price must cover
-            # the requested shares with a 10% cushion for last-moment churn.
+            # Depth clamp: ask for at most DEPTH_CLAMP_BUFFER of the
+            # cumulative ask size at <= FOK limit. Protects our order
+            # against book churn during signing/network latency. Skip
+            # only if the clamped target falls below MIN_FILL_RATIO of
+            # intended size (too thin to bother) or below MIN_POSITION_USDC
+            # (too small to be a real position).
             book = window.up_book if signal.side == "up" else window.down_book
             limit = fok_limit_price(entry_price)
             fillable = sum(
                 lvl["size"] for lvl in (book or []) if lvl["price"] <= limit + 1e-9
             )
-            required = size * 1.1
-            if fillable < required:
+            target_size = min(size, fillable * DEPTH_CLAMP_BUFFER)
+            if target_size < size * MIN_FILL_RATIO:
                 self._window_skip_reason = "book-too-thin"
                 log.warning(
-                    "Skipping signal: need %.1f shares @ ≤$%.2f, book has %.1f",
-                    required, limit, fillable,
+                    "Skipping signal: book too thin — intended=%.2f shares @ <=$%.2f, "
+                    "fillable=%.2f, clamped target=%.2f (min ratio %.2f)",
+                    size, limit, fillable, target_size, MIN_FILL_RATIO,
                 )
                 return
+            if target_size * entry_price < MIN_POSITION_USDC:
+                self._window_skip_reason = "book-too-thin"
+                log.warning(
+                    "Skipping signal: clamped trade below min position — "
+                    "target=%.2f @ $%.3f = $%.2f < $%.2f",
+                    target_size, entry_price, target_size * entry_price,
+                    MIN_POSITION_USDC,
+                )
+                return
+            if target_size < size:
+                log.info(
+                    "Downsizing trade to depth: intended=%.2f target=%.2f "
+                    "fillable=%.2f limit=$%.2f",
+                    size, target_size, fillable, limit,
+                )
+                size = target_size
+                size_usdc = target_size * entry_price
 
         raw_str = (
             f"raw={signal.model_p_up_raw * 100:.1f}%" if signal.model_p_up_raw is not None else "raw=n/a"

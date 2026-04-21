@@ -1141,37 +1141,6 @@ async def test_bot_live_skips_when_book_age_none(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_bot_live_skips_when_book_too_thin(tmp_path: Path, monkeypatch):
-    """Depth gate: cumulative size at <= FOK limit price must cover 1.1x required."""
-    client = _CapturingClient()
-    bot = _make_live_bot(tmp_path, monkeypatch, client)
-
-    # At $0.55 entry with FOK_SLIPPAGE_TICKS=3, limit=$0.58.
-    # Book only has 3 shares total at <=$0.58 — far less than needed.
-    window = Window(
-        condition_id="thin-test",
-        question="BTC Up or Down",
-        up_token_id="UP", down_token_id="DOWN",
-        end_time=time.time() + 180,
-        slug="btc-updown-5m-thin",
-        price_to_beat=84198.0,
-        up_ask=0.55, down_ask=0.45,
-        up_book=[
-            {"price": 0.55, "size": 2.0},
-            {"price": 0.56, "size": 1.0},
-            {"price": 0.70, "size": 1000.0},  # outside the limit band
-        ],
-        down_book=[{"price": 0.45, "size": 1000.0}],
-        book_updated_at=time.monotonic(),
-    )
-
-    await bot._on_book_update(window, "up")
-
-    assert client.calls == []
-    assert bot._window_skip_reason == "book-too-thin"
-
-
-@pytest.mark.asyncio
 async def test_bot_live_submits_when_book_deep_and_fresh(tmp_path: Path, monkeypatch):
     """Sanity: gates are no-ops on a healthy book."""
     client = _CapturingClient()
@@ -1261,3 +1230,166 @@ async def test_bot_live_skips_when_balance_below_min_position(tmp_path: Path, mo
     assert client.calls == []
     assert bot._window_skip_reason == "insufficient-balance"
     assert bot.stats["execution_status"] == "no-balance"
+
+
+@pytest.mark.asyncio
+async def test_bot_live_clamps_size_when_book_shallow(tmp_path: Path, monkeypatch):
+    """Book holds less than intended size but >= MIN_FILL_RATIO * intended:
+    trade fires at clamped size (fillable * DEPTH_CLAMP_BUFFER)."""
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    # With edge=0.20, vol_scale=1 (sigma forced to 0.001 floor), intended =
+    # MAX_POSITION_USDC / entry = ~9.09 shares at $0.55.
+    # Book holds 8 shares at <= FOK limit (0.55 + 3 ticks = 0.58).
+    # ratio = 8*0.9/9.09 = 0.79 > 0.5. Clamp to 8 * 0.9 = 7.2 shares.
+    window = Window(
+        condition_id="shallow-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-shallow",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[
+            {"price": 0.55, "size": 8.0},
+            {"price": 0.70, "size": 1000.0},  # outside limit band
+        ],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert len(client.calls) == 1
+    # fillable = 8, clamped = 8 * 0.9 = 7.2. intended is ~9.09 shares
+    # (MAX_POSITION_USDC/entry), so the clamp engages.
+    assert client.calls[0]["size"] == pytest.approx(7.2, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_bot_live_submits_intended_when_book_deep(tmp_path: Path, monkeypatch):
+    """Book holds far more than intended -> clamp is a no-op."""
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="deep-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-deep",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[{"price": 0.55, "size": 1000.0}],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert len(client.calls) == 1
+    # intended size is some edge/vol-derived value; just check the clamp
+    # did NOT reduce it below something the old flow would have accepted.
+    assert client.calls[0]["size"] > 1.0  # not dust
+    # And NOT clamped to book depth * 0.9 = 900 (which would mean clamp
+    # fired incorrectly).
+    assert client.calls[0]["size"] < 100.0
+
+
+@pytest.mark.asyncio
+async def test_bot_live_skips_when_depth_below_min_fill_ratio(
+    tmp_path: Path, monkeypatch
+):
+    """Book holds < MIN_FILL_RATIO * intended -> skip book-too-thin."""
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    # Same shape as the old test_bot_live_skips_when_book_too_thin: only
+    # 3 shares at <= limit. With intended ~ 18 shares, clamp would give
+    # 3*0.9=2.7, which is 2.7/18 = 0.15 < MIN_FILL_RATIO (0.5) -> skip.
+    window = Window(
+        condition_id="thin-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-thin",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[
+            {"price": 0.55, "size": 2.0},
+            {"price": 0.56, "size": 1.0},
+            {"price": 0.70, "size": 1000.0},
+        ],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert client.calls == []
+    assert bot._window_skip_reason == "book-too-thin"
+
+
+@pytest.mark.asyncio
+async def test_bot_live_skips_when_book_empty(tmp_path: Path, monkeypatch):
+    """Empty book / None -> skip book-too-thin (fillable=0)."""
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="empty-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-empty",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert client.calls == []
+    assert bot._window_skip_reason == "book-too-thin"
+
+
+@pytest.mark.asyncio
+async def test_bot_live_skips_when_clamped_size_below_min_position_usdc(
+    tmp_path: Path, monkeypatch
+):
+    """Clamp passes ratio but clamped_size * price < MIN_POSITION_USDC -> skip.
+
+    With MIN_POSITION_USDC=5 (default), a clamped size of 8 shares at $0.55 =
+    $4.40 is below the floor; trade must skip rather than submit a dust
+    order. Use a small intended size so ratio passes but floor blocks.
+    """
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+    # Downsize intent artificially by forcing a tiny available balance so
+    # the balance clamp pushes intended size close to the floor, then the
+    # depth clamp shaves it below.
+    monkeypatch.setattr(
+        "polypocket.bot.MIN_POSITION_USDC", 5.0, raising=False
+    )
+
+    window = Window(
+        condition_id="floor-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-floor",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        # fillable=8. clamped=7.2. 7.2*0.55=$3.96 < $5 floor.
+        up_book=[{"price": 0.55, "size": 8.0}, {"price": 0.70, "size": 1000.0}],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert client.calls == []
+    assert bot._window_skip_reason == "book-too-thin"
