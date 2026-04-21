@@ -367,6 +367,27 @@ class Bot:
         edge_scale = min(max((signal.edge - EDGE_FLOOR) / EDGE_RANGE, 0.0), 1.0)
         vol_scale = min(max((sigma - VOL_FLOOR) / VOL_RANGE, 0.0), 1.0)
         size_usdc = MIN_POSITION_USDC + (edge_scale * vol_scale) * (MAX_POSITION_USDC - MIN_POSITION_USDC)
+
+        # Live-only preflight: clamp size_usdc to available balance (minus a
+        # 2% buffer for fees). Only skip when we can't even afford the floor.
+        if TRADING_MODE != "paper" and self.live_order_client is not None:
+            balance = self.live_order_client.get_usdc_balance()
+            max_affordable = balance * 0.98
+            if max_affordable < MIN_POSITION_USDC:
+                self._window_skip_reason = "insufficient-balance"
+                self.stats["execution_status"] = "no-balance"
+                log.error(
+                    "Insufficient USDC ($%.2f available, need ≥$%.2f) — skipping window %s",
+                    balance, MIN_POSITION_USDC, window.slug,
+                )
+                return
+            if max_affordable < size_usdc:
+                log.info(
+                    "Downsizing trade: balance=$%.2f, clamping $%.2f → $%.2f",
+                    balance, size_usdc, max_affordable,
+                )
+                size_usdc = max_affordable
+
         size = size_usdc / entry_price
 
         # Staleness gate: refuse to trade on a book that hasn't ticked recently.

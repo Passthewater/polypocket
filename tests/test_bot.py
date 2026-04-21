@@ -887,3 +887,71 @@ async def test_bot_live_submits_when_book_deep_and_fresh(tmp_path: Path, monkeyp
     await bot._on_book_update(window, "up")
 
     assert len(client.calls) == 1
+
+
+class _ThinWalletClient(_CapturingClient):
+    def __init__(self, balance: float):
+        super().__init__()
+        self._balance = balance
+
+    def get_usdc_balance(self):
+        return self._balance
+
+
+@pytest.mark.asyncio
+async def test_bot_live_downsizes_when_balance_below_max(tmp_path: Path, monkeypatch):
+    """Balance $8 with max position $20: trade should submit at ~$8*0.98, not skip."""
+    from polypocket.config import MAX_POSITION_USDC, MIN_POSITION_USDC
+    client = _ThinWalletClient(balance=8.0)
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="downsize-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-downsize",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[{"price": 0.55, "size": 1000.0}],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert len(client.calls) == 1
+    # At balance=8.0 and entry=0.55, clamped size = 8.0*0.98 / 0.55 ≈ 14.25 shares
+    submitted = client.calls[0]["size"]
+    expected = (8.0 * 0.98) / 0.55
+    assert submitted == pytest.approx(expected, rel=0.01)
+    # Must not exceed the unclamped MAX_POSITION_USDC-derived size
+    assert submitted <= MAX_POSITION_USDC / 0.55
+
+
+@pytest.mark.asyncio
+async def test_bot_live_skips_when_balance_below_min_position(tmp_path: Path, monkeypatch):
+    """Balance $2 with MIN_POSITION_USDC=$5: skip, don't submit."""
+    from polypocket.config import MIN_POSITION_USDC
+    # Ensure the wallet is below the floor even after the 2% buffer is applied.
+    client = _ThinWalletClient(balance=MIN_POSITION_USDC * 0.5)
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="skip-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-skip",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[{"price": 0.55, "size": 1000.0}],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert client.calls == []
+    assert bot._window_skip_reason == "insufficient-balance"
+    assert bot.stats["execution_status"] == "no-balance"
