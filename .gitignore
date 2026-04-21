@@ -3,7 +3,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.env
 paper_trades.db
 paper_trades*.bak.db
+live_trades.db
+live_trades*.bak.db
 observations.csv
 reports/
