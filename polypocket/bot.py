@@ -169,6 +169,7 @@ class Bot:
                     "size": recovered_trade["size"],
                     "mode": TRADING_MODE,
                     "status": recovered_trade["status"],
+                    "external_order_id": recovered_trade.get("external_order_id"),
                 }
                 self.stats["position"] = self._format_position(self._open_trade)
                 # Remove from pending list to avoid double settlement
@@ -511,6 +512,11 @@ class Bot:
 
         if result.success:
             self._window_traded = True
+            external_order_id = None
+            if TRADING_MODE != "paper":
+                recorded = find_trade_by_window_slug(self.db_path, window.slug)
+                if recorded is not None:
+                    external_order_id = recorded.get("external_order_id")
             self._open_trade = {
                 "trade_id": result.trade_id,
                 "side": signal.side,
@@ -518,6 +524,7 @@ class Bot:
                 "size": size,
                 "mode": TRADING_MODE,
                 "status": "open",
+                "external_order_id": external_order_id,
             }
             self.stats["position"] = self._format_position(self._open_trade)
             self.stats["execution_status"] = "open"
@@ -532,12 +539,24 @@ class Bot:
 
         trade = self._open_trade
         if trade.get("mode") == "live":
-            settle_live_trade(self.db_path, trade["trade_id"], outcome)
-            pnl = None
+            pnl = settle_live_trade(
+                self.db_path,
+                trade["trade_id"],
+                trade["side"],
+                outcome,
+                trade.get("external_order_id"),
+                self.live_order_client,
+            )
+            if pnl is not None:
+                if pnl > 0:
+                    self.risk.record_win()
+                else:
+                    self.risk.record_loss()
             log.info(
-                "LIVE RESOLVED: %s -> trade %s marked settled pending reconciliation",
+                "LIVE RESOLVED: %s -> trade %s pnl=%s",
                 outcome.upper(),
                 trade["trade_id"],
+                f"${pnl:.2f}" if pnl is not None else "unreconciled",
             )
         else:
             pnl = settle_paper_trade(
@@ -606,7 +625,22 @@ class Bot:
                     outcome.upper(),
                 )
                 if trade.get("mode") == "live":
-                    settle_live_trade(self.db_path, trade["trade_id"], outcome)
+                    pnl = settle_live_trade(
+                        self.db_path,
+                        trade["trade_id"],
+                        trade["side"],
+                        outcome,
+                        trade.get("external_order_id"),
+                        self.live_order_client,
+                    )
+                    if pnl is not None:
+                        if pnl > 0:
+                            self.risk.record_win()
+                        else:
+                            self.risk.record_loss()
+                        log.info("SETTLED pending (live): %s -> P&L $%.2f", outcome.upper(), pnl)
+                    else:
+                        log.info("SETTLED pending (live, unreconciled): %s", outcome.upper())
                 else:
                     pnl = settle_paper_trade(
                         self.db_path,
@@ -631,7 +665,7 @@ class Bot:
                 )
                 if self.on_trade:
                     self.on_trade(
-                        TradeResult(success=True, trade_id=trade["trade_id"], pnl=pnl if trade.get("mode") != "live" else None),
+                        TradeResult(success=True, trade_id=trade["trade_id"], pnl=pnl),
                         None,
                         None,
                     )
@@ -654,6 +688,7 @@ class Bot:
                 "mode": TRADING_MODE,
                 "status": row["status"],
                 "window_slug": row["window_slug"],
+                "external_order_id": row.get("external_order_id"),
             })
         if unsettled:
             log.info("Recovered %d unsettled trade(s) from database", len(unsettled))

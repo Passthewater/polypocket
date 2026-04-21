@@ -356,6 +356,139 @@ async def test_bot_live_mode_recovers_reserved_trade_and_prevents_reentry(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_bot_live_settle_uses_clob_settlement_info_for_real_pnl(
+    tmp_path: Path, monkeypatch
+):
+    """When a live trade resolves, the bot must query the CLOB via the
+    injected client and record real PnL + risk outcome."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+    from polypocket.executor import SettlementInfo
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    trade_id = log_trade(
+        db_path=str(db_path),
+        window_slug="btc-updown-5m-789",
+        side="up",
+        entry_price=0.55,
+        size=10.0,
+        fees=0.0,
+        model_p_up=0.75,
+        market_p_up=0.55,
+        edge=0.20,
+        outcome=None,
+        pnl=None,
+        status="open",
+    )
+    # Flag the row with an external order id so the settle path queries CLOB.
+    from polypocket.ledger import update_trade
+    update_trade(str(db_path), trade_id, outcome=None, pnl=None, status="open",
+                 external_order_id="clob-ord-42")
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+
+    async def mock_resolution(slug):
+        return "up"
+    monkeypatch.setattr(bot_module, "fetch_resolution", mock_resolution)
+
+    client = Mock()
+    client.get_settlement_info = Mock(
+        return_value=SettlementInfo(shares_held=9.0, cost_usdc=5.5)
+    )
+
+    bot = Bot(db_path=str(db_path), live_order_client=client)
+    bot.binance.latest_price = 84350.0
+    record_win = Mock()
+    record_loss = Mock()
+    bot.risk.record_win = record_win
+    bot.risk.record_loss = record_loss
+
+    expired_window = Window(
+        condition_id="abc789",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() - 1,
+        slug="btc-updown-5m-789",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(expired_window, "up")
+
+    trade = find_trade_by_window_slug(str(db_path), "btc-updown-5m-789")
+    assert trade["status"] == "settled"
+    assert trade["outcome"] == "up"
+    assert trade["pnl"] == pytest.approx(3.5)
+    client.get_settlement_info.assert_called_once_with("clob-ord-42")
+    record_win.assert_called_once()
+    record_loss.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_poll_pending_settlements_live_writes_real_pnl(
+    tmp_path: Path, monkeypatch
+):
+    """A live trade parked in _pending_settlements should reconcile via the
+    CLOB client and write real PnL."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+    from polypocket.executor import SettlementInfo
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    trade_id = log_trade(
+        db_path=str(db_path),
+        window_slug="btc-updown-5m-pnd",
+        side="down", entry_price=0.45, size=10.0, fees=0.0,
+        model_p_up=0.25, market_p_up=0.45, edge=0.15,
+        outcome=None, pnl=None, status="open",
+    )
+    from polypocket.ledger import update_trade
+    update_trade(str(db_path), trade_id, outcome=None, pnl=None, status="open",
+                 external_order_id="clob-pnd-1")
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+
+    async def mock_resolution(slug):
+        return "up"  # we're "down" → loss
+    monkeypatch.setattr(bot_module, "fetch_resolution", mock_resolution)
+
+    client = Mock()
+    client.get_settlement_info = Mock(
+        return_value=SettlementInfo(shares_held=9.0, cost_usdc=4.5)
+    )
+
+    bot = Bot(db_path=str(db_path), live_order_client=client)
+    record_loss = Mock()
+    bot.risk.record_loss = record_loss
+    bot._pending_settlements.append({
+        "trade_id": trade_id,
+        "side": "down",
+        "entry_price": 0.45,
+        "size": 10.0,
+        "mode": "live",
+        "status": "open",
+        "window_slug": "btc-updown-5m-pnd",
+        "external_order_id": "clob-pnd-1",
+    })
+
+    await bot._poll_pending_settlements()
+
+    trade = find_trade_by_window_slug(str(db_path), "btc-updown-5m-pnd")
+    assert trade["status"] == "settled"
+    assert trade["outcome"] == "up"
+    assert trade["pnl"] == pytest.approx(-4.5)
+    client.get_settlement_info.assert_called_once_with("clob-pnd-1")
+    record_loss.assert_called_once()
+    assert bot._pending_settlements == []
+
+
+@pytest.mark.asyncio
 async def test_bot_preview_edge_exposes_down_side_price(tmp_path: Path):
     from polypocket.bot import Bot
 

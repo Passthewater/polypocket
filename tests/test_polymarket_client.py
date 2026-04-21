@@ -191,3 +191,36 @@ def test_fok_limit_price_capped_at_99c():
     assert fok_limit_price(0.98) <= 0.99
     assert fok_limit_price(0.99) == 0.99
     assert fok_limit_price(1.00) == 0.99
+
+
+def test_get_settlement_info_parses_get_order_response(mock_clob):
+    """shares_held applies the taker fee to matched size; cost is matched × price."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {
+        "status": "MATCHED", "size_matched": "10.0",
+        "price": "0.55", "fee_rate_bps": "1000",
+    }
+
+    info = client.get_settlement_info("abc-order")
+
+    inst.get_order.assert_called_once_with("abc-order")
+    assert info.shares_held == pytest.approx(10.0 * 0.9)
+    assert info.cost_usdc == pytest.approx(10.0 * 0.55)
+
+
+def test_get_settlement_info_zero_fee(mock_clob):
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {
+        "size_matched": "5.0", "price": "0.42", "fee_rate_bps": "0",
+    }
+    info = client.get_settlement_info("ord-2")
+    assert info.shares_held == pytest.approx(5.0)
+    assert info.cost_usdc == pytest.approx(2.10)
+
+
+def test_get_settlement_info_dry_run_returns_zeros(mock_clob):
+    client, inst = _make_client(mock_clob, dry_run=True)
+    info = client.get_settlement_info("DRY-RUN")
+    assert info.shares_held == 0.0
+    assert info.cost_usdc == 0.0
+    inst.get_order.assert_not_called()

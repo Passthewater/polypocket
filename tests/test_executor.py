@@ -4,12 +4,20 @@ import tempfile
 
 import pytest
 
-from polypocket.executor import FillResult, TradeResult, execute_paper_trade, execute_live_trade
+from polypocket.executor import (
+    FillResult,
+    SettlementInfo,
+    TradeResult,
+    execute_paper_trade,
+    execute_live_trade,
+    settle_live_trade,
+)
 from polypocket.ledger import (
     find_trade_by_window_slug,
     get_paper_balance,
     init_db,
     log_trade as persist_trade,
+    update_trade,
 )
 from polypocket.signal import Signal
 
@@ -393,6 +401,133 @@ def test_live_trade_rejected_marks_trade_rejected_with_error():
     assert trade["status"] == "rejected"
     assert trade["error"] == "no match"
     assert trade["external_order_id"] is None
+    os.unlink(db_path)
+
+
+class SettlingLiveOrderClient:
+    """Live client stub that also exposes get_settlement_info."""
+    def __init__(self, settlements: dict[str, SettlementInfo], balance: float = 1000.0):
+        self.calls = []
+        self._balance = balance
+        self._settlements = settlements
+        self.settlement_lookups: list[str] = []
+
+    def submit_fok(self, side, price, size, token_id, condition_id):
+        self.calls.append({"side": side, "price": price, "size": size,
+                           "token_id": token_id, "condition_id": condition_id})
+        return FillResult(status="filled", order_id=f"ord-{len(self.calls)}",
+                          filled_size=size, avg_price=price, error=None)
+
+    def get_usdc_balance(self):
+        return self._balance
+
+    def get_settlement_info(self, order_id):
+        self.settlement_lookups.append(order_id)
+        return self._settlements[order_id]
+
+
+def _seed_open_live_trade(db_path, window_slug, side, order_id):
+    trade_id = persist_trade(
+        db_path=db_path,
+        window_slug=window_slug,
+        side=side,
+        entry_price=0.55,
+        size=10.0,
+        fees=0.0,
+        model_p_up=0.7,
+        market_p_up=0.55,
+        edge=0.15,
+        outcome=None,
+        pnl=None,
+        status="open",
+    )
+    update_trade(db_path, trade_id, outcome=None, pnl=None, status="open",
+                 external_order_id=order_id)
+    return trade_id
+
+
+def test_settle_live_trade_win_writes_real_pnl():
+    db_path = make_db()
+    trade_id = _seed_open_live_trade(db_path, "btc-5m-livewin", "up", "ord-1")
+    client = SettlingLiveOrderClient(
+        {"ord-1": SettlementInfo(shares_held=9.0, cost_usdc=5.5)}
+    )
+
+    pnl = settle_live_trade(
+        db_path=db_path, trade_id=trade_id, side="up", outcome="up",
+        order_id="ord-1", client=client,
+    )
+
+    assert pnl == pytest.approx(9.0 - 5.5)
+    assert client.settlement_lookups == ["ord-1"]
+    trade = find_trade_by_window_slug(db_path, "btc-5m-livewin")
+    assert trade["status"] == "settled"
+    assert trade["outcome"] == "up"
+    assert trade["pnl"] == pytest.approx(3.5)
+    os.unlink(db_path)
+
+
+def test_settle_live_trade_loss_writes_negative_pnl():
+    db_path = make_db()
+    trade_id = _seed_open_live_trade(db_path, "btc-5m-liveloss", "up", "ord-7")
+    client = SettlingLiveOrderClient(
+        {"ord-7": SettlementInfo(shares_held=9.0, cost_usdc=5.5)}
+    )
+
+    pnl = settle_live_trade(
+        db_path=db_path, trade_id=trade_id, side="up", outcome="down",
+        order_id="ord-7", client=client,
+    )
+
+    assert pnl == pytest.approx(-5.5)
+    trade = find_trade_by_window_slug(db_path, "btc-5m-liveloss")
+    assert trade["status"] == "settled"
+    assert trade["outcome"] == "down"
+    assert trade["pnl"] == pytest.approx(-5.5)
+    os.unlink(db_path)
+
+
+def test_settle_live_trade_without_order_id_falls_back_to_unreconciled():
+    db_path = make_db()
+    trade_id = _seed_open_live_trade(db_path, "btc-5m-legacy", "up", "will-be-cleared")
+    update_trade(db_path, trade_id, outcome=None, pnl=None, status="open")
+    # simulate a legacy row: clear the order id via a direct UPDATE
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE trades SET external_order_id = NULL WHERE id = ?", (trade_id,))
+    conn.commit()
+    conn.close()
+
+    client = SettlingLiveOrderClient({})
+    pnl = settle_live_trade(
+        db_path=db_path, trade_id=trade_id, side="up", outcome="up",
+        order_id=None, client=client,
+    )
+    assert pnl is None
+    assert client.settlement_lookups == []
+    trade = find_trade_by_window_slug(db_path, "btc-5m-legacy")
+    assert trade["status"] == "settled"
+    assert trade["outcome"] == "up"
+    assert trade["pnl"] is None
+    os.unlink(db_path)
+
+
+def test_settle_live_trade_clob_error_falls_back_to_unreconciled():
+    db_path = make_db()
+    trade_id = _seed_open_live_trade(db_path, "btc-5m-clobfail", "down", "ord-x")
+
+    class ErroringClient:
+        def get_settlement_info(self, order_id):
+            raise RuntimeError("CLOB 500")
+
+    pnl = settle_live_trade(
+        db_path=db_path, trade_id=trade_id, side="down", outcome="down",
+        order_id="ord-x", client=ErroringClient(),
+    )
+    assert pnl is None
+    trade = find_trade_by_window_slug(db_path, "btc-5m-clobfail")
+    assert trade["status"] == "settled"
+    assert trade["pnl"] is None
     os.unlink(db_path)
 
 

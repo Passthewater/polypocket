@@ -12,7 +12,7 @@ from py_clob_client.clob_types import (
 )
 
 from polypocket.config import FOK_SLIPPAGE_TICKS
-from polypocket.executor import FillResult
+from polypocket.executor import FillResult, SettlementInfo
 
 log = logging.getLogger(__name__)
 
@@ -149,3 +149,23 @@ class PolymarketClient:
 
     def get_order_status(self, order_id: str) -> dict:
         return self._client.get_order(order_id)
+
+    def get_settlement_info(self, order_id: str) -> SettlementInfo:
+        """Look up the CLOB record of a filled order and return real fill accounting.
+
+        shares_held = size_matched × (1 - fee_rate_bps/10000).
+        cost_usdc   = size_matched × price.
+        Polymarket charges the taker fee in outcome shares on BUY orders, so the
+        USDC debited equals size×price and the shares actually deposited are
+        post-fee. `size_matched` from the CLOB is the pre-fee matched size.
+        """
+        if self._dry_run or order_id == "DRY-RUN":
+            return SettlementInfo(shares_held=0.0, cost_usdc=0.0)
+
+        resp = self._client.get_order(order_id)
+        size_matched = float(resp.get("size_matched", 0.0) or 0.0)
+        price = float(resp.get("price", 0.0) or 0.0)
+        fee_rate_bps = float(resp.get("fee_rate_bps", 0) or 0)
+        shares_held = size_matched * (1.0 - fee_rate_bps / 10_000.0)
+        cost_usdc = size_matched * price
+        return SettlementInfo(shares_held=shares_held, cost_usdc=cost_usdc)

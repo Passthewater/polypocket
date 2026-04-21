@@ -36,12 +36,24 @@ class FillResult:
     error: str | None
 
 
+@dataclass(frozen=True)
+class SettlementInfo:
+    """Post-fill, post-resolution accounting pulled from the CLOB.
+
+    `shares_held` is the outcome-token balance actually owned (post-fee).
+    `cost_usdc` is the USDC that actually left the account for the fill.
+    """
+    shares_held: float
+    cost_usdc: float
+
+
 class LiveOrderClient(Protocol):
     def submit_fok(
         self, side: str, price: float, size: float,
         token_id: str, condition_id: str,
     ) -> FillResult: ...
     def get_usdc_balance(self) -> float: ...
+    def get_settlement_info(self, order_id: str) -> SettlementInfo: ...
 
 
 def _window_consumed_result(db_path: str, window_slug: str) -> TradeResult:
@@ -216,6 +228,40 @@ def settle_paper_trade(
     return pnl
 
 
-def settle_live_trade(db_path: str, trade_id: int, outcome: str) -> None:
-    """Mark a live trade resolved locally without touching paper balances."""
-    update_trade(db_path, trade_id, outcome=outcome, pnl=None, status="settled")
+def settle_live_trade(
+    db_path: str,
+    trade_id: int,
+    side: str,
+    outcome: str,
+    order_id: str | None,
+    client: LiveOrderClient | None,
+) -> float | None:
+    """Reconcile a resolved live trade against the CLOB and write real PnL.
+
+    Returns the computed PnL, or None if reconciliation couldn't run (legacy
+    rows without an external_order_id, or CLOB lookup errors) — in which
+    case the row is still marked settled with pnl=None so the bot can move on.
+    """
+    if order_id is None or client is None:
+        log.warning(
+            "settle_live_trade: no order_id/client for trade %s — marking settled with pnl=None",
+            trade_id,
+        )
+        update_trade(db_path, trade_id, outcome=outcome, pnl=None, status="settled")
+        return None
+
+    try:
+        info = client.get_settlement_info(order_id)
+    except Exception as exc:
+        log.exception("settle_live_trade: CLOB lookup failed for order %s: %s", order_id, exc)
+        update_trade(db_path, trade_id, outcome=outcome, pnl=None, status="settled")
+        return None
+
+    payout = info.shares_held if side == outcome else 0.0
+    pnl = payout - info.cost_usdc
+    update_trade(db_path, trade_id, outcome=outcome, pnl=pnl, status="settled")
+    log.info(
+        "LIVE SETTLED trade %s: %s %s x%.4f cost=$%.4f payout=$%.4f pnl=$%.4f",
+        trade_id, side, outcome, info.shares_held, info.cost_usdc, payout, pnl,
+    )
+    return pnl
