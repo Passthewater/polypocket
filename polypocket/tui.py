@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
@@ -155,7 +155,6 @@ class PolypocketApp(App):
         super().__init__()
         self.bot = bot if bot is not None else Bot()
         self._session_start_time = datetime.now()
-        self._session_start_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         self._bot_ready = False
 
     def compose(self) -> ComposeResult:
@@ -216,9 +215,7 @@ class PolypocketApp(App):
             self.query_one("#status", StatusPanel).update_stats(self.bot.stats, self.bot.db_path)
             self.query_one("#window", WindowPanel).update_stats(self.bot.stats)
             self.query_one("#trades", TradesPanel).update_trades(self.bot.db_path)
-            self.query_one("#stats-bar", StatsBar).update_stats(
-                self.bot.db_path, since=self._session_start_utc
-            )
+            self.query_one("#stats-bar", StatsBar).update_stats(self.bot.db_path)
         except Exception as exc:
             log.error("Panel refresh error: %s", exc)
 
@@ -229,7 +226,7 @@ class PolypocketApp(App):
 
     def action_report(self) -> None:
         rich_log = self.query_one("#log", RichLog)
-        stats = get_session_stats(self.bot.db_path, since=self._session_start_utc)
+        stats = get_session_stats(self.bot.db_path)
         rich_log.write("\n--- SESSION REPORT ---")
         rich_log.write(f"Wins: {stats['wins']}  Losses: {stats['losses']}")
         rich_log.write(f"Total P&L: ${stats['pnl']:+,.2f}")
