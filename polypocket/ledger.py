@@ -286,12 +286,7 @@ def get_session_stats(db_path: str, since: str | None = None) -> dict:
             ).fetchall()
         else:
             rows = conn.execute(
-                """
-                SELECT pnl
-                FROM trades
-                WHERE date(timestamp, 'localtime') = date('now', 'localtime')
-                  AND pnl IS NOT NULL
-                """
+                "SELECT pnl FROM trades WHERE pnl IS NOT NULL"
             ).fetchall()
 
     wins = sum(1 for row in rows if row[0] > 0)

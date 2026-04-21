@@ -13,7 +13,7 @@ from textual.widgets import Footer, Header, RichLog, Static
 
 from polypocket.bot import Bot
 from polypocket.config import MAX_DAILY_LOSS, MAX_POSITION_USDC, MIN_EDGE_THRESHOLD, MIN_POSITION_USDC, TRADING_MODE
-from polypocket.ledger import get_daily_pnl, get_paper_balance, get_recent_trades, get_session_stats
+from polypocket.ledger import get_paper_balance, get_recent_trades, get_session_stats
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class StatusPanel(Static):
         position = stats.get("position")
 
         balance = get_paper_balance(db_path)
-        daily = get_daily_pnl(db_path)
+        total_pnl = get_session_stats(db_path)["pnl"]
 
         lines = ["[bold]STATUS[/bold]", ""]
         ptb_provisional = stats.get("ptb_provisional", False)
@@ -59,7 +59,7 @@ class StatusPanel(Static):
         lines.append(f"Volatility: {sigma:.4%}" if sigma else "Volatility: --")
         lines.append("")
         lines.append(f"Paper Balance: ${balance:,.2f}")
-        lines.append(f"Daily P&L: ${daily:+,.2f}")
+        lines.append(f"Total P&L: ${total_pnl:+,.2f}")
         if position:
             lines.append(f"Position: {escape(str(position))}")
         self.update("\n".join(lines))
