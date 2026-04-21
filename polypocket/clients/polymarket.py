@@ -7,10 +7,9 @@ from py_clob_client.clob_types import (
     ApiCreds,
     AssetType,
     BalanceAllowanceParams,
-    OrderArgs,
+    MarketOrderArgs,
     OrderType,
 )
-from py_clob_client.order_builder.constants import BUY
 
 from polypocket.executor import FillResult
 
@@ -83,15 +82,21 @@ class PolymarketClient:
             )
 
         fee_rate_bps = self._fee_rate_bps(condition_id)
-        args = OrderArgs(
+        # FOK must go through create_market_order: Polymarket requires
+        # makerAmount accuracy of 2 decimals and takerAmount 4 decimals
+        # for taker-style orders. The limit-order path (create_order +
+        # OrderArgs.size) produces 4-decimal makerAmount (e.g. 27.78 *
+        # 0.36 = 10.0008) and is rejected with `invalid amounts`.
+        # Market-order path computes makerAmount = round_down(amount, 2)
+        # directly, which the server accepts.
+        args = MarketOrderArgs(
             token_id=token_id,
-            price=price,
-            size=size,
-            side=BUY,
+            amount=round(size * price, 2),  # USDC to spend, 2dp
+            price=price,                    # limit (max) price
             fee_rate_bps=fee_rate_bps,
         )
         try:
-            signed = self._client.create_order(args)
+            signed = self._client.create_market_order(args)
             resp = self._client.post_order(signed, OrderType.FOK)
         except Exception as exc:
             log.exception("submit_fok network/signing error")

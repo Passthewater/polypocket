@@ -30,7 +30,7 @@ def _make_client(mock_clob_cls, dry_run=False):
 
 def test_submit_fok_filled(mock_clob):
     client, inst = _make_client(mock_clob)
-    inst.create_order.return_value = MagicMock()
+    inst.create_market_order.return_value = MagicMock()
     inst.post_order.return_value = {"success": True, "status": "matched", "orderID": "abc"}
     inst.get_order.return_value = {"status": "matched", "size_matched": "7.0"}
 
@@ -44,26 +44,28 @@ def test_submit_fok_filled(mock_clob):
 
 
 def test_submit_fok_passes_market_fee_rate(mock_clob):
-    """OrderArgs.fee_rate_bps must come from the market's taker_base_fee."""
+    """MarketOrderArgs.fee_rate_bps must come from the market's taker_base_fee."""
     client, inst = _make_client(mock_clob)
     inst.get_market.return_value = {"taker_base_fee": 1000}
-    inst.create_order.return_value = MagicMock()
+    inst.create_market_order.return_value = MagicMock()
     inst.post_order.return_value = {"success": True, "status": "matched", "orderID": "abc"}
     inst.get_order.return_value = {"status": "matched", "size_matched": "7.0"}
 
     client.submit_fok(side="up", price=0.51, size=7.0,
                       token_id="TKN-UP", condition_id="0xCOND")
 
-    inst.create_order.assert_called_once()
-    args = inst.create_order.call_args.args[0]
+    inst.create_market_order.assert_called_once()
+    args = inst.create_market_order.call_args.args[0]
     assert args.fee_rate_bps == 1000
     assert args.token_id == "TKN-UP"
+    assert args.amount == pytest.approx(round(7.0 * 0.51, 2))
+    assert args.price == 0.51
 
 
 def test_submit_fok_caches_market_fee(mock_clob):
     """get_market must be called only once per condition_id across submissions."""
     client, inst = _make_client(mock_clob)
-    inst.create_order.return_value = MagicMock()
+    inst.create_market_order.return_value = MagicMock()
     inst.post_order.return_value = {"success": True, "status": "matched", "orderID": "x"}
     inst.get_order.return_value = {"status": "matched", "size_matched": "1.0"}
 
@@ -77,21 +79,21 @@ def test_submit_fok_caches_market_fee(mock_clob):
 def test_submit_fok_market_lookup_failure_uses_zero_fee(mock_clob):
     client, inst = _make_client(mock_clob)
     inst.get_market.side_effect = RuntimeError("market lookup down")
-    inst.create_order.return_value = MagicMock()
+    inst.create_market_order.return_value = MagicMock()
     inst.post_order.return_value = {"success": True, "status": "matched", "orderID": "x"}
     inst.get_order.return_value = {"status": "matched", "size_matched": "1.0"}
 
     client.submit_fok(side="up", price=0.51, size=1.0,
                       token_id="TKN-UP", condition_id="0xCOND")
 
-    args = inst.create_order.call_args.args[0]
+    args = inst.create_market_order.call_args.args[0]
     assert args.fee_rate_bps == 0
 
 
 def test_submit_fok_success_but_unmatched_is_rejected(mock_clob):
     """FOK: `success=True, status='unmatched'` must NOT be recorded as filled."""
     client, inst = _make_client(mock_clob)
-    inst.create_order.return_value = MagicMock()
+    inst.create_market_order.return_value = MagicMock()
     inst.post_order.return_value = {"success": True, "status": "unmatched"}
 
     fill = client.submit_fok(side="up", price=0.51, size=7.0,
@@ -105,7 +107,7 @@ def test_submit_fok_success_but_unmatched_is_rejected(mock_clob):
 
 def test_submit_fok_rejected(mock_clob):
     client, inst = _make_client(mock_clob)
-    inst.create_order.return_value = MagicMock()
+    inst.create_market_order.return_value = MagicMock()
     inst.post_order.return_value = {"success": False, "errorMsg": "not matched"}
 
     fill = client.submit_fok(side="up", price=0.51, size=7.0,
@@ -119,7 +121,7 @@ def test_submit_fok_rejected(mock_clob):
 
 def test_submit_fok_network_error(mock_clob):
     client, inst = _make_client(mock_clob)
-    inst.create_order.side_effect = RuntimeError("boom")
+    inst.create_market_order.side_effect = RuntimeError("boom")
 
     fill = client.submit_fok(side="up", price=0.51, size=7.0,
                              token_id="TKN-UP", condition_id="0xCOND")
@@ -136,7 +138,7 @@ def test_submit_fok_dry_run_does_not_post(mock_clob):
 
     assert fill.status == "filled"
     assert fill.order_id == "DRY-RUN"
-    inst.create_order.assert_not_called()
+    inst.create_market_order.assert_not_called()
     inst.post_order.assert_not_called()
     inst.get_market.assert_not_called()
 
