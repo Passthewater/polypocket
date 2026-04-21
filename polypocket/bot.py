@@ -547,11 +547,10 @@ class Bot:
                 trade.get("external_order_id"),
                 self.live_order_client,
             )
-            if pnl is not None:
-                if pnl > 0:
-                    self.risk.record_win()
-                else:
-                    self.risk.record_loss()
+            if pnl is None or pnl <= 0:
+                self.risk.record_loss()
+            else:
+                self.risk.record_win()
             log.info(
                 "LIVE RESOLVED: %s -> trade %s pnl=%s",
                 outcome.upper(),
@@ -633,11 +632,11 @@ class Bot:
                         trade.get("external_order_id"),
                         self.live_order_client,
                     )
+                    if pnl is None or pnl <= 0:
+                        self.risk.record_loss()
+                    else:
+                        self.risk.record_win()
                     if pnl is not None:
-                        if pnl > 0:
-                            self.risk.record_win()
-                        else:
-                            self.risk.record_loss()
                         log.info("SETTLED pending (live): %s -> P&L $%.2f", outcome.upper(), pnl)
                     else:
                         log.info("SETTLED pending (live, unreconciled): %s", outcome.upper())

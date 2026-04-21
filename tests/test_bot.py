@@ -489,6 +489,58 @@ async def test_poll_pending_settlements_live_writes_real_pnl(
 
 
 @pytest.mark.asyncio
+async def test_live_settle_unreconciled_counts_as_loss(
+    tmp_path: Path, monkeypatch
+):
+    """If the CLOB can't return settlement info (no order_id, or lookup
+    error), the bot must still advance the consecutive-loss counter —
+    conservative fallback so reconciliation failures can't mask a losing
+    streak."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    trade_id = log_trade(
+        db_path=str(db_path),
+        window_slug="btc-updown-5m-unr",
+        side="up", entry_price=0.55, size=10.0, fees=0.0,
+        model_p_up=0.75, market_p_up=0.55, edge=0.20,
+        outcome=None, pnl=None, status="open",
+    )
+    # No external_order_id → settle_live_trade returns None.
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+
+    async def mock_resolution(slug):
+        return "up"
+    monkeypatch.setattr(bot_module, "fetch_resolution", mock_resolution)
+
+    bot = Bot(db_path=str(db_path), live_order_client=Mock())
+    record_win = Mock()
+    record_loss = Mock()
+    bot.risk.record_win = record_win
+    bot.risk.record_loss = record_loss
+    bot._pending_settlements.append({
+        "trade_id": trade_id,
+        "side": "up",
+        "entry_price": 0.55,
+        "size": 10.0,
+        "mode": "live",
+        "status": "open",
+        "window_slug": "btc-updown-5m-unr",
+        "external_order_id": None,
+    })
+
+    await bot._poll_pending_settlements()
+
+    record_loss.assert_called_once()
+    record_win.assert_not_called()
+    assert bot._pending_settlements == []
+
+
+@pytest.mark.asyncio
 async def test_bot_preview_edge_exposes_down_side_price(tmp_path: Path):
     from polypocket.bot import Bot
 
