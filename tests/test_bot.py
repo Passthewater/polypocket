@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from polypocket.config import effective_ask
-from polypocket.executor import TradeResult
+from polypocket.executor import FillResult, TradeResult
 from polypocket.feeds.polymarket import Window
 from polypocket.ledger import find_trade_by_window_slug, get_paper_balance, get_snapshots_for_window, init_db, log_trade
 from polypocket.signal import Signal
@@ -690,3 +690,60 @@ async def test_full_window_lifecycle_produces_three_snapshots(tmp_path: Path, mo
     # Verify close has outcome
     close = next(s for s in snapshots if s["snapshot_type"] == "close")
     assert close["outcome"] == "up"
+
+
+@pytest.mark.asyncio
+async def test_live_mode_threads_up_token_id(tmp_path: Path, monkeypatch):
+    """Signal.side='up' → execute_live_trade called with window.up_token_id."""
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setattr("polypocket.bot.TRADING_MODE", "live")
+
+    from polypocket.bot import Bot
+
+    class CapturingClient:
+        def __init__(self):
+            self.calls = []
+
+        def submit_fok(self, side, price, size, token_id, client_order_id):
+            self.calls.append({"side": side, "token_id": token_id})
+            return FillResult(
+                status="filled", order_id="ord-test",
+                filled_size=size, avg_price=price, error=None,
+            )
+
+        def get_usdc_balance(self):
+            return 1000.0
+
+    db_path = tmp_path / "live.db"
+    init_db(str(db_path))
+    client = CapturingClient()
+    bot = Bot(db_path=str(db_path), live_order_client=client)
+    bot.binance.latest_price = 84350.0
+    bot.signal_engine.evaluate = lambda **kwargs: Signal(
+        side="up",
+        model_p_up=0.75,
+        market_price=0.55,
+        edge=0.20,
+        up_edge=0.20,
+        down_edge=-0.20,
+    )
+    bot.risk.check = lambda: (True, "")
+
+    window = Window(
+        condition_id="live-test",
+        question="BTC Up or Down",
+        up_token_id="UP-TOKEN-ID",
+        down_token_id="DOWN-TOKEN-ID",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-live",
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["side"] == "up"
+    assert client.calls[0]["token_id"] == "UP-TOKEN-ID"
+    assert bot._live_trades_submitted == 1
