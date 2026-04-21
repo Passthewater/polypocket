@@ -704,8 +704,8 @@ async def test_live_mode_threads_up_token_id(tmp_path: Path, monkeypatch):
         def __init__(self):
             self.calls = []
 
-        def submit_fok(self, side, price, size, token_id, client_order_id):
-            self.calls.append({"side": side, "token_id": token_id})
+        def submit_fok(self, side, price, size, token_id, condition_id):
+            self.calls.append({"side": side, "token_id": token_id, "condition_id": condition_id})
             return FillResult(
                 status="filled", order_id="ord-test",
                 filled_size=size, avg_price=price, error=None,

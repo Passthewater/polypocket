@@ -182,13 +182,13 @@ class RecordingLiveOrderClient:
         self.calls = []
         self._balance = balance
 
-    def submit_fok(self, side, price, size, token_id, client_order_id):
+    def submit_fok(self, side, price, size, token_id, condition_id):
         self.calls.append({
             "side": side, "price": price, "size": size,
-            "token_id": token_id, "client_order_id": client_order_id,
+            "token_id": token_id, "condition_id": condition_id,
         })
         return FillResult(
-            status="filled", order_id=f"ord-{client_order_id}",
+            status="filled", order_id=f"ord-{len(self.calls)}",
             filled_size=size, avg_price=price, error=None,
         )
 
@@ -202,7 +202,7 @@ class RejectingLiveOrderClient:
         self._balance = balance
         self._error = error
 
-    def submit_fok(self, side, price, size, token_id, client_order_id):
+    def submit_fok(self, side, price, size, token_id, condition_id):
         self.calls += 1
         return FillResult(
             status="rejected", order_id=None,
@@ -213,7 +213,7 @@ class RejectingLiveOrderClient:
         return self._balance
 
 
-def test_live_trade_uses_deterministic_client_order_id():
+def test_live_trade_threads_args_to_client():
     db_path = make_db()
     signal = Signal(
         side="down",
@@ -232,6 +232,7 @@ def test_live_trade_uses_deterministic_client_order_id():
         size=5.0,
         window_slug="eth-5m-999",
         token_id="TKN-DOWN",
+        condition_id="0xcond",
         client=client,
     )
 
@@ -242,7 +243,7 @@ def test_live_trade_uses_deterministic_client_order_id():
             "price": 0.45,
             "size": 5.0,
             "token_id": "TKN-DOWN",
-            "client_order_id": "window-eth-5m-999",
+            "condition_id": "0xcond",
         }
     ]
     trade = find_trade_by_window_slug(db_path, "eth-5m-999")
@@ -273,18 +274,11 @@ def test_duplicate_live_trade_rejection_does_not_submit_again():
         size=7.0,
         window_slug="sol-5m-dup",
         token_id="TKN-UP",
+        condition_id="0xcond",
         client=client,
     )
     assert first.success is True
-    assert client.calls == [
-        {
-            "side": "up",
-            "price": 0.51,
-            "size": 7.0,
-            "token_id": "TKN-UP",
-            "client_order_id": "window-sol-5m-dup",
-        }
-    ]
+    assert len(client.calls) == 1
 
     second = execute_live_trade(
         db_path=db_path,
@@ -293,6 +287,7 @@ def test_duplicate_live_trade_rejection_does_not_submit_again():
         size=7.0,
         window_slug="sol-5m-dup",
         token_id="TKN-UP",
+        condition_id="0xcond",
         client=client,
     )
 
@@ -328,6 +323,7 @@ def test_live_trade_race_on_insert_returns_consumed_existing_trade(monkeypatch):
         size=7.0,
         window_slug="sol-5m-race",
         token_id="TKN-UP",
+        condition_id="0xcond",
         client=client,
     )
 
@@ -357,7 +353,7 @@ def test_live_trade_insufficient_balance_writes_no_row():
                     edge=0.21, up_edge=0.21, down_edge=-0.21)
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.51, size=7.0,
-        window_slug="btc-5m-nb", token_id="TKN-UP",
+        window_slug="btc-5m-nb", token_id="TKN-UP", condition_id="0xcond",
         client=InsufficientBalanceClient(),
     )
     assert result.success is False
@@ -373,12 +369,12 @@ def test_live_trade_filled_writes_external_order_id():
     client = RecordingLiveOrderClient()
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.51, size=7.0,
-        window_slug="btc-5m-fill", token_id="TKN-UP", client=client,
+        window_slug="btc-5m-fill", token_id="TKN-UP", condition_id="0xcond", client=client,
     )
     assert result.success is True
     trade = find_trade_by_window_slug(db_path, "btc-5m-fill")
     assert trade["status"] == "open"
-    assert trade["external_order_id"] == "ord-window-btc-5m-fill"
+    assert trade["external_order_id"] == "ord-1"
     os.unlink(db_path)
 
 
@@ -389,7 +385,7 @@ def test_live_trade_rejected_marks_trade_rejected_with_error():
     client = RejectingLiveOrderClient(error="no match")
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.44, size=4.0,
-        window_slug="btc-5m-rej", token_id="TKN-DOWN", client=client,
+        window_slug="btc-5m-rej", token_id="TKN-DOWN", condition_id="0xcond", client=client,
     )
     assert result.success is False
     assert result.error == "no match"
@@ -413,7 +409,7 @@ def test_live_trade_client_error_marks_trade_rejected():
                     edge=0.21, up_edge=0.21, down_edge=-0.21)
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.51, size=7.0,
-        window_slug="btc-5m-err", token_id="TKN-UP", client=ErroringClient(),
+        window_slug="btc-5m-err", token_id="TKN-UP", condition_id="0xcond", client=ErroringClient(),
     )
     assert result.success is False
     assert "network" in result.error

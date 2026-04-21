@@ -423,6 +423,7 @@ class Bot:
                 size=size,
                 window_slug=window.slug,
                 token_id=token_id,
+                condition_id=window.condition_id,
                 client=self.live_order_client,
             )
             if result.success:

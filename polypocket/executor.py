@@ -13,7 +13,6 @@ from polypocket.ledger import (
     find_trade_by_window_slug,
     log_trade,
     update_trade,
-    update_trade_status,
 )
 from polypocket.signal import Signal
 
@@ -40,13 +39,9 @@ class FillResult:
 class LiveOrderClient(Protocol):
     def submit_fok(
         self, side: str, price: float, size: float,
-        token_id: str, client_order_id: str,
+        token_id: str, condition_id: str,
     ) -> FillResult: ...
     def get_usdc_balance(self) -> float: ...
-
-
-def _window_client_order_id(window_slug: str) -> str:
-    return f"window-{window_slug}"
 
 
 def _window_consumed_result(db_path: str, window_slug: str) -> TradeResult:
@@ -137,6 +132,7 @@ def execute_live_trade(
     size: float,
     window_slug: str,
     token_id: str,
+    condition_id: str,
     client: LiveOrderClient,
 ) -> TradeResult:
     existing_trade = find_trade_by_window_slug(db_path, window_slug)
@@ -147,7 +143,6 @@ def execute_live_trade(
     if client.get_usdc_balance() < usdc_needed:
         return TradeResult(success=False, error="insufficient-balance")
 
-    client_order_id = _window_client_order_id(window_slug)
     fee_sh = fee_shares(size, entry_price)
     try:
         trade_id = log_trade(
@@ -175,7 +170,7 @@ def execute_live_trade(
         price=entry_price,
         size=size,
         token_id=token_id,
-        client_order_id=client_order_id,
+        condition_id=condition_id,
     )
 
     if fill.status == "filled":
