@@ -1477,3 +1477,36 @@ async def test_bot_floor_gate_passes_at_boundary(
     await bot._on_book_update(window, "up")
 
     assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_bot_emits_ioc_diagnostic_log_line(tmp_path: Path, monkeypatch, caplog):
+    """Per-trade IOC_DIAG INFO line records intended vs. actual fill fields."""
+    import logging
+    caplog.set_level(logging.INFO, logger="polypocket.bot")
+
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="diag-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-diag",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.45,
+        up_book=[{"price": 0.55, "size": 1000.0}],
+        down_book=[{"price": 0.45, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    records = [r for r in caplog.records if "IOC_DIAG" in r.getMessage()]
+    assert len(records) == 1
+    msg = records[0].getMessage()
+    assert "intended=" in msg
+    assert "target=" in msg
+    assert "fillable=" in msg
+    assert "limit=" in msg

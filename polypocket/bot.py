@@ -405,6 +405,10 @@ class Bot:
 
         size = size_usdc / entry_price
 
+        # Initialize diagnostic variables; overwritten in live path below.
+        intended_size_pre_clamp = size
+        fillable = 0.0
+
         # Staleness gate: refuse to trade on a book that hasn't ticked recently.
         # Covers WS-reconnect gaps and silent stalls — without a fixed grace
         # window that could expire mid-reconnect.
@@ -427,7 +431,7 @@ class Bot:
             # only if even a MIN_FILL_RATIO slice of visible depth cannot
             # clear MIN_POSITION_USDC (guarantees any non-skipped trade's
             # worst-acceptable partial is above the dust floor).
-            intended_size_pre_clamp = size  # preserve for diagnostic log
+            intended_size_pre_clamp = size  # may differ from outer init if balance clamp fired
             book = window.up_book if signal.side == "up" else window.down_book
             limit = fok_limit_price(entry_price)
             fillable = sum(
@@ -503,6 +507,20 @@ class Bot:
                 token_id=token_id,
                 condition_id=window.condition_id,
                 client=self.live_order_client,
+            )
+
+            # Diagnostic log: compare snapshot vs. realized fill for root-cause analysis.
+            recorded = find_trade_by_window_slug(self.db_path, window.slug)
+            actual_size = recorded.get("size") if recorded else None
+            actual_price = recorded.get("entry_price") if recorded else None
+            shortfall = (size - actual_size) if actual_size is not None else None
+            log.info(
+                "IOC_DIAG intended=%.4f target=%.4f fillable=%.4f limit=%.4f "
+                "filled=%s vwap=%s shortfall=%s",
+                intended_size_pre_clamp, size, fillable, fok_limit_price(entry_price),
+                f"{actual_size:.4f}" if actual_size is not None else "n/a",
+                f"{actual_price:.4f}" if actual_price is not None else "n/a",
+                f"{shortfall:.4f}" if shortfall is not None else "n/a",
             )
 
         if not result.success and result.error == "window-already-consumed":
