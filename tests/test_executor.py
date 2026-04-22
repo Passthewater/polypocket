@@ -746,6 +746,37 @@ def test_execute_live_trade_partial_fill_persists_actual_size():
     os.unlink(db_path)
 
 
+def test_execute_live_trade_error_with_order_id_persists_order_id():
+    """On error path, if submit_ioc returns an order_id it must be written to the ledger.
+
+    Without this, a settlement-lookup failure strands the fill — the startup
+    reconciler has no order_id to recover from.
+    """
+    db_path = make_db()
+    signal = _sample_signal()
+    client = MagicMock()
+    client.get_usdc_balance.return_value = 100.0
+    # Simulate submit_ioc with settlement-lookup failure: order was placed and
+    # matched (order_id="abc") but get_settlement_info raised.
+    client.submit_ioc.return_value = FillResult(
+        status="error", order_id="abc",
+        filled_size=0.0, avg_price=None, error="settlement-lookup: CLOB 500",
+    )
+
+    result = execute_live_trade(
+        db_path=db_path, signal=signal, entry_price=0.51,
+        size=7.0, window_slug="w-err-oid", token_id="T", condition_id="C",
+        client=client,
+    )
+
+    assert result.success is False
+    trade = find_trade_by_window_slug(db_path, "w-err-oid")
+    assert trade["status"] == "rejected"
+    # Key assertion: order_id must be persisted so reconciler can recover
+    assert trade["external_order_id"] == "abc"
+    os.unlink(db_path)
+
+
 def test_execute_live_trade_logs_dust_warning(caplog):
     """Dust fill below MIN_POSITION_USDC * 0.25 emits a WARN dust-fill log."""
     db_path = make_db()

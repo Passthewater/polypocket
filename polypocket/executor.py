@@ -264,6 +264,7 @@ def execute_live_trade(
     # rejected or error
     update_trade(
         db_path, trade_id, outcome=None, pnl=None, status="rejected",
+        external_order_id=fill.order_id,
         error=fill.error,
     )
     log.warning(

@@ -407,6 +407,29 @@ def test_submit_ioc_no_match_returns_rejected(mock_clob):
     inst.cancel.assert_called_once()
 
 
+def test_submit_ioc_settlement_failure_preserves_order_id(mock_clob):
+    """get_settlement_info failure must still return order_id so reconciler can recover."""
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
+    inst.get_order.return_value = {"size_matched": "7.0", "associate_trades": []}
+    # get_settlement_info internally calls get_order again then get_trades;
+    # make the second get_order call raise to simulate a lookup failure.
+    inst.get_order.side_effect = [
+        {"size_matched": "7.0"},   # first call: check fully_matched
+        RuntimeError("CLOB 500"),  # second call: inside get_settlement_info
+    ]
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND")
+
+    assert fill.status == "error"
+    assert fill.order_id == "abc"
+    assert "settlement-lookup" in fill.error
+
+
 def test_submit_ioc_post_raises_returns_error(mock_clob):
     client, inst = _make_client(mock_clob)
     inst.create_market_order.side_effect = Exception("network down")
