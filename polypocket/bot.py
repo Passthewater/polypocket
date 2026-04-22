@@ -422,34 +422,29 @@ class Bot:
                 return
 
             # Depth clamp: ask for at most DEPTH_CLAMP_BUFFER of the
-            # cumulative ask size at <= FOK limit. Protects our order
-            # against book churn during signing/network latency. Skip
-            # only if the clamped target falls below MIN_FILL_RATIO of
-            # intended size (too thin to bother) or below MIN_POSITION_USDC
-            # (too small to be a real position).
+            # cumulative ask size at <= FOK limit. Under IOC semantics the
+            # realized fill can be anywhere between 0 and target_size; skip
+            # only if even a MIN_FILL_RATIO slice of visible depth cannot
+            # clear MIN_POSITION_USDC (guarantees any non-skipped trade's
+            # worst-acceptable partial is above the dust floor).
+            intended_size_pre_clamp = size  # preserve for diagnostic log
             book = window.up_book if signal.side == "up" else window.down_book
             limit = fok_limit_price(entry_price)
             fillable = sum(
                 lvl["size"] for lvl in (book or []) if lvl["price"] <= limit + 1e-9
             )
+
+            floor_usdc = MIN_POSITION_USDC
+            if fillable * entry_price * MIN_FILL_RATIO < floor_usdc:
+                self._window_skip_reason = "book-too-thin"
+                log.warning(
+                    "Skipping signal: book too thin — fillable=%.2f @ <=$%.2f, "
+                    "min_slice_value=$%.2f < floor=$%.2f",
+                    fillable, limit, fillable * entry_price * MIN_FILL_RATIO, floor_usdc,
+                )
+                return
+
             target_size = min(size, fillable * DEPTH_CLAMP_BUFFER)
-            if target_size < size * MIN_FILL_RATIO:
-                self._window_skip_reason = "book-too-thin"
-                log.warning(
-                    "Skipping signal: book too thin — intended=%.2f shares @ <=$%.2f, "
-                    "fillable=%.2f, clamped target=%.2f (min ratio %.2f)",
-                    size, limit, fillable, target_size, MIN_FILL_RATIO,
-                )
-                return
-            if target_size * entry_price < MIN_POSITION_USDC:
-                self._window_skip_reason = "book-too-thin"
-                log.warning(
-                    "Skipping signal: clamped trade below min position — "
-                    "target=%.2f @ $%.3f = $%.2f < $%.2f",
-                    target_size, entry_price, target_size * entry_price,
-                    MIN_POSITION_USDC,
-                )
-                return
             if target_size < size:
                 log.info(
                     "Downsizing trade to depth: intended=%.2f target=%.2f "

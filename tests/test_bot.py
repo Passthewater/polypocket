@@ -1248,17 +1248,20 @@ async def test_bot_live_skips_when_balance_below_min_position(tmp_path: Path, mo
 async def test_bot_live_clamps_size_when_book_shallow(tmp_path: Path, monkeypatch):
     """Book holds less than intended size but >= MIN_FILL_RATIO * intended:
     trade fires at clamped size (fillable * DEPTH_CLAMP_BUFFER)."""
-    # Pin MAX_POSITION_USDC so intended size is 5/0.55 ≈ 9.09 shares,
-    # independent of any operator override sitting in `.env` / module defaults.
-    monkeypatch.setattr("polypocket.bot.MAX_POSITION_USDC", 5.0)
+    # Pin MAX_POSITION_USDC=6 so intended size is 6/0.55 ≈ 10.9 shares,
+    # and MIN_POSITION_USDC=3 so floor gate passes when fillable=11
+    # (11 * 0.55 * 0.5 = 3.025 >= 3.0). Clamp engages because
+    # 11 * 0.9 = 9.9 < 10.9.
+    monkeypatch.setattr("polypocket.bot.MAX_POSITION_USDC", 6.0)
     monkeypatch.setattr("polypocket.bot.MIN_POSITION_USDC", 3.0)
     client = _CapturingClient()
     bot = _make_live_bot(tmp_path, monkeypatch, client)
 
     # With edge=0.20, vol_scale=1 (sigma forced to 0.001 floor), intended =
-    # MAX_POSITION_USDC / entry = ~9.09 shares at $0.55.
-    # Book holds 8 shares at <= FOK limit (0.55 + 3 ticks = 0.58).
-    # ratio = 8*0.9/9.09 = 0.79 > 0.5. Clamp to 8 * 0.9 = 7.2 shares.
+    # MAX_POSITION_USDC / entry = ~10.9 shares at $0.55.
+    # Book holds 11 shares at <= FOK limit (0.55 + 3 ticks = 0.58).
+    # Floor gate: 11 * 0.55 * 0.5 = 3.025 >= 3.0 -> passes.
+    # Clamp: min(10.9, 11*0.9=9.9) = 9.9 < 10.9 -> clamp engages.
     window = Window(
         condition_id="shallow-test",
         question="BTC Up or Down",
@@ -1268,7 +1271,7 @@ async def test_bot_live_clamps_size_when_book_shallow(tmp_path: Path, monkeypatc
         price_to_beat=84198.0,
         up_ask=0.55, down_ask=0.45,
         up_book=[
-            {"price": 0.55, "size": 8.0},
+            {"price": 0.55, "size": 11.0},
             {"price": 0.70, "size": 1000.0},  # outside limit band
         ],
         down_book=[{"price": 0.45, "size": 1000.0}],
@@ -1278,9 +1281,9 @@ async def test_bot_live_clamps_size_when_book_shallow(tmp_path: Path, monkeypatc
     await bot._on_book_update(window, "up")
 
     assert len(client.calls) == 1
-    # fillable = 8, clamped = 8 * 0.9 = 7.2. intended is ~9.09 shares
+    # fillable = 11, clamped = 11 * 0.9 = 9.9. intended is ~10.9 shares
     # (MAX_POSITION_USDC/entry), so the clamp engages.
-    assert client.calls[0]["size"] == pytest.approx(7.2, rel=1e-3)
+    assert client.calls[0]["size"] == pytest.approx(9.9, rel=1e-3)
 
 
 @pytest.mark.asyncio
@@ -1409,3 +1412,68 @@ async def test_bot_live_skips_when_clamped_size_below_min_position_usdc(
 
     assert client.calls == []
     assert bot._window_skip_reason == "book-too-thin"
+
+
+@pytest.mark.asyncio
+async def test_bot_floor_gate_engages_when_fillable_below_min_position(
+    tmp_path: Path, monkeypatch
+):
+    """Pre-trade gate skips when fillable * entry_price * MIN_FILL_RATIO < MIN_POSITION_USDC.
+
+    MIN_POSITION_USDC=5, entry=0.50, MIN_FILL_RATIO=0.5 (default).
+    fillable=10: 10 * 0.50 * 0.5 = 2.5 < 5 -> skip.
+    """
+    monkeypatch.setattr("polypocket.bot.MIN_POSITION_USDC", 5.0, raising=False)
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="gate-engages-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-gate-engages",
+        price_to_beat=84198.0,
+        up_ask=0.50, down_ask=0.50,
+        # fillable=10 at price 0.50: 10 * 0.50 * 0.5 = 2.5 < 5 -> skip
+        up_book=[{"price": 0.50, "size": 10.0}, {"price": 0.70, "size": 1000.0}],
+        down_book=[{"price": 0.50, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert client.calls == []
+    assert bot._window_skip_reason == "book-too-thin"
+
+
+@pytest.mark.asyncio
+async def test_bot_floor_gate_passes_at_boundary(
+    tmp_path: Path, monkeypatch
+):
+    """At the floor boundary, the gate allows the trade through.
+
+    MIN_POSITION_USDC=5, entry=0.50, MIN_FILL_RATIO=0.5.
+    fillable=20: 20 * 0.50 * 0.5 = 5.0 >= 5 -> passes gate.
+    """
+    monkeypatch.setattr("polypocket.bot.MIN_POSITION_USDC", 5.0, raising=False)
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="gate-boundary-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-gate-boundary",
+        price_to_beat=84198.0,
+        up_ask=0.50, down_ask=0.50,
+        # fillable=20 at price 0.50: 20 * 0.50 * 0.5 = 5.0 >= 5 -> pass
+        up_book=[{"price": 0.50, "size": 20.0}, {"price": 0.70, "size": 1000.0}],
+        down_book=[{"price": 0.50, "size": 1000.0}],
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert len(client.calls) == 1
