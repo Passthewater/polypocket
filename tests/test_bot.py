@@ -1236,6 +1236,10 @@ async def test_bot_live_skips_when_balance_below_min_position(tmp_path: Path, mo
 async def test_bot_live_clamps_size_when_book_shallow(tmp_path: Path, monkeypatch):
     """Book holds less than intended size but >= MIN_FILL_RATIO * intended:
     trade fires at clamped size (fillable * DEPTH_CLAMP_BUFFER)."""
+    # Pin MAX_POSITION_USDC so intended size is 5/0.55 ≈ 9.09 shares,
+    # independent of any operator override sitting in `.env` / module defaults.
+    monkeypatch.setattr("polypocket.bot.MAX_POSITION_USDC", 5.0)
+    monkeypatch.setattr("polypocket.bot.MIN_POSITION_USDC", 3.0)
     client = _CapturingClient()
     bot = _make_live_bot(tmp_path, monkeypatch, client)
 

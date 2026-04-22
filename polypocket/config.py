@@ -4,7 +4,7 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 # --- Signal thresholds ---
 MIN_EDGE_THRESHOLD = 0.03
