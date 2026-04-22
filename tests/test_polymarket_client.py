@@ -305,3 +305,33 @@ def test_get_settlement_info_dry_run_returns_zeros(mock_clob):
     assert info.shares_held == 0.0
     assert info.cost_usdc == 0.0
     inst.get_order.assert_not_called()
+
+
+def test_cancel_order_success(mock_clob):
+    client, inst = _make_client(mock_clob)
+    inst.cancel.return_value = {"canceled": ["abc"]}
+    ok = client.cancel_order("abc")
+    assert ok is True
+    inst.cancel.assert_called_once_with(order_id="abc")
+
+
+def test_cancel_order_dry_run(mock_clob):
+    client, _ = _make_client(mock_clob, dry_run=True)
+    assert client.cancel_order("DRY-RUN") is True
+    assert client.cancel_order("anything") is True
+
+
+def test_cancel_order_retries_then_succeeds(mock_clob):
+    client, inst = _make_client(mock_clob)
+    inst.cancel.side_effect = [Exception("transient"), {"canceled": ["abc"]}]
+    ok = client.cancel_order("abc")
+    assert ok is True
+    assert inst.cancel.call_count == 2
+
+
+def test_cancel_order_gives_up_after_retries(mock_clob):
+    client, inst = _make_client(mock_clob)
+    inst.cancel.side_effect = Exception("persistent")
+    ok = client.cancel_order("abc")
+    assert ok is False
+    assert inst.cancel.call_count == 3  # 1 + 2 retries (CANCEL_RETRY_MAX=2)

@@ -1,6 +1,7 @@
 """Polymarket CLOB client — L2 proxy-wallet signing."""
 
 import logging
+import time
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
@@ -24,6 +25,9 @@ log = logging.getLogger(__name__)
 # this account: sig_type=2 (POLY_GNOSIS_SAFE) returns $0; sig_type=1 returns
 # the real balance.
 POLY_PROXY_SIG_TYPE = 1
+
+CANCEL_RETRY_MAX = 2
+CANCEL_RETRY_BACKOFF_S = 0.25
 
 
 def fok_limit_price(price: float) -> float:
@@ -135,6 +139,29 @@ class PolymarketClient:
             status="filled", order_id=order_id, filled_size=filled,
             avg_price=price, error=None,
         )
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel a resting order. Retries on transient errors.
+
+        Returns True on success, False if all retries fail. Errors are logged
+        but not raised — the caller records whatever matched via /trades and
+        the startup reconciler catches orphans.
+        """
+        if self._dry_run:
+            return True
+
+        last_exc: Exception | None = None
+        for attempt in range(CANCEL_RETRY_MAX + 1):
+            try:
+                self._client.cancel(order_id=order_id)
+                return True
+            except Exception as exc:
+                last_exc = exc
+                if attempt < CANCEL_RETRY_MAX:
+                    time.sleep(CANCEL_RETRY_BACKOFF_S * (attempt + 1))
+        log.error("cancel_order failed after %d attempts for order %s: %s",
+                  CANCEL_RETRY_MAX + 1, order_id, last_exc)
+        return False
 
     def get_usdc_balance(self) -> float:
         params = BalanceAllowanceParams(
