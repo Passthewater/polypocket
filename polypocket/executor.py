@@ -54,7 +54,7 @@ class LiveOrderClient(Protocol):
     ) -> FillResult: ...
     def submit_ioc(
         self, side: str, price: float, size: float,
-        token_id: str, condition_id: str,
+        token_id: str, condition_id: str, limit_price: float,
     ) -> FillResult: ...
     def cancel_order(self, order_id: str) -> bool: ...
     def get_usdc_balance(self) -> float: ...
@@ -201,6 +201,7 @@ def execute_live_trade(
     token_id: str,
     condition_id: str,
     client: LiveOrderClient,
+    limit_price: float,
 ) -> TradeResult:
     existing_trade = find_trade_by_window_slug(db_path, window_slug)
     if existing_trade is not None:
@@ -238,6 +239,7 @@ def execute_live_trade(
         size=size,
         token_id=token_id,
         condition_id=condition_id,
+        limit_price=limit_price,
     )
 
     if fill.status == "filled":

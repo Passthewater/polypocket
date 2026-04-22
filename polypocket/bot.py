@@ -10,6 +10,7 @@ from polypocket.config import (
     DEPTH_CLAMP_BUFFER,
     EDGE_FLOOR,
     EDGE_RANGE,
+    IOC_BUFFER_TICKS,
     MAX_BOOK_AGE_S,
     MAX_POSITION_USDC,
     MIN_FILL_RATIO,
@@ -21,7 +22,7 @@ from polypocket.config import (
     VOLATILITY_LOOKBACK,
     effective_ask,
 )
-from polypocket.clients.polymarket import fok_limit_price
+from polypocket.clients.polymarket import ioc_limit_price
 from polypocket.executor import (
     LiveOrderClient,
     TradeResult,
@@ -409,8 +410,9 @@ class Bot:
 
         size = size_usdc / entry_price
 
-        # Diagnostic fillable; overwritten in live path below.
+        # Diagnostic fillable + live-only limit_price; overwritten below.
         fillable = 0.0
+        limit_price: float | None = None
 
         # Staleness gate: refuse to trade on a book that hasn't ticked recently.
         # Covers WS-reconnect gaps and silent stalls — without a fixed grace
@@ -428,25 +430,37 @@ class Bot:
                 )
                 return
 
-            # Depth clamp: ask for at most DEPTH_CLAMP_BUFFER of the
-            # cumulative ask size at <= FOK limit. Under IOC semantics the
-            # realized fill can be anywhere between 0 and target_size; skip
-            # only if even a MIN_FILL_RATIO slice of visible depth cannot
-            # clear MIN_POSITION_USDC (guarantees any non-skipped trade's
-            # worst-acceptable partial is above the dust floor).
-            book = window.up_book if signal.side == "up" else window.down_book
-            limit = fok_limit_price(entry_price)
+            # Pair-merge limit: for a BUY UP the clearing price is driven by
+            # DOWN-side bids (1 - best_down_bid). Compute our limit above that
+            # so the order crosses via pair-merge rather than resting against
+            # same-side asks (which don't consume on binary markets).
+            limit_price = ioc_limit_price(
+                signal.side, window.up_bids, window.down_bids, IOC_BUFFER_TICKS,
+            )
+            if limit_price is None:
+                self._window_skip_reason = "no-pair-merge-counterparty"
+                log.warning(
+                    "Skipping signal: no pair-merge counterparty on opposite book",
+                )
+                return
+
+            # Depth clamp against opposite-side bids: pair-merge consumes
+            # opp-side bids, so fillable is opp-bid size at prices that can
+            # clear at our limit (opp_bid_price >= 1 - limit_price).
+            opp_bids = window.down_bids if signal.side == "up" else window.up_bids
+            threshold = 1.0 - limit_price
             fillable = sum(
-                lvl["size"] for lvl in (book or []) if lvl["price"] <= limit + 1e-9
+                lvl["size"] for lvl in (opp_bids or [])
+                if lvl["price"] >= threshold - 1e-9
             )
 
             floor_usdc = MIN_POSITION_USDC
-            if fillable * entry_price * MIN_FILL_RATIO < floor_usdc:
+            if fillable * limit_price * MIN_FILL_RATIO < floor_usdc:
                 self._window_skip_reason = "book-too-thin"
                 log.warning(
-                    "Skipping signal: book too thin — fillable=%.2f @ <=$%.2f, "
+                    "Skipping signal: book too thin — fillable=%.2f opp-bids @ >=$%.4f, "
                     "min_slice_value=$%.2f < floor=$%.2f",
-                    fillable, limit, fillable * entry_price * MIN_FILL_RATIO, floor_usdc,
+                    fillable, threshold, fillable * limit_price * MIN_FILL_RATIO, floor_usdc,
                 )
                 return
 
@@ -454,8 +468,8 @@ class Bot:
             if target_size < size:
                 log.info(
                     "Downsizing trade to depth: intended=%.2f target=%.2f "
-                    "fillable=%.2f limit=$%.2f",
-                    size, target_size, fillable, limit,
+                    "fillable=%.2f limit=$%.4f",
+                    size, target_size, fillable, limit_price,
                 )
                 size = target_size
                 size_usdc = target_size * entry_price
@@ -509,6 +523,7 @@ class Bot:
                 token_id=token_id,
                 condition_id=window.condition_id,
                 client=self.live_order_client,
+                limit_price=limit_price,
             )
 
             # Diagnostic log: compare snapshot vs. realized fill for root-cause analysis.
@@ -519,7 +534,7 @@ class Bot:
             log.info(
                 "IOC_DIAG intended=%.4f target=%.4f fillable=%.4f limit=%.4f "
                 "filled=%s vwap=%s shortfall=%s",
-                intended_size_pre_clamp, size, fillable, fok_limit_price(entry_price),
+                intended_size_pre_clamp, size, fillable, limit_price,
                 f"{actual_size:.4f}" if actual_size is not None else "n/a",
                 f"{actual_price:.4f}" if actual_price is not None else "n/a",
                 f"{shortfall:.4f}" if shortfall is not None else "n/a",

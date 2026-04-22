@@ -35,6 +35,30 @@ def fok_limit_price(price: float) -> float:
     return round(min(0.99, price + FOK_SLIPPAGE_TICKS * 0.01), 2)
 
 
+def ioc_limit_price(
+    side: str,
+    up_bids: list[dict] | None,
+    down_bids: list[dict] | None,
+    buffer_ticks: int,
+) -> float | None:
+    """Pair-merge-aware taker limit for binary (UP/DOWN) markets.
+
+    A BUY UP crosses via pair-merge against a DOWN-side BUY: the two orders
+    sum-to-1 (plus fees), so the effective clearing price for the UP taker
+    is `1 - best_down_bid`. We add `buffer_ticks` of slippage headroom
+    against DOWN-book churn during the signing window, then cap at $0.99.
+
+    Returns None when the opposite book has no bid — no counterparty exists
+    for a pair-merge match; caller should skip with
+    'no-pair-merge-counterparty'.
+    """
+    opp_bids = down_bids if side == "up" else up_bids
+    if not opp_bids:
+        return None
+    best_opp = max(float(b["price"]) for b in opp_bids)
+    return round(min(0.99, (1.0 - best_opp) + buffer_ticks * 0.01), 2)
+
+
 class PolymarketClient:
     """Concrete LiveOrderClient for Polymarket's CLOB using L2 proxy signing."""
 
@@ -140,18 +164,19 @@ class PolymarketClient:
             avg_price=price, error=None,
         )
 
-    def submit_ioc(self, side, price, size, token_id, condition_id):
-        """Post GTC at FOK-limit price, immediately cancel remainder.
+    def submit_ioc(self, side, price, size, token_id, condition_id, limit_price):
+        """Post GTC at caller-supplied limit price, immediately cancel remainder.
 
         True-IOC semantic layered on GTC since py_clob_client doesn't expose
-        IOC natively. Any match at <= fok_limit_price fills (within slippage
-        budget by construction); remainder is cancelled. Returned filled_size
-        is shares_held from per-fill /trades data (post-fee).
+        IOC natively. Any match at <= limit_price fills; remainder is
+        cancelled. limit_price is computed upstream (pair-merge-aware via
+        `ioc_limit_price`) since only the bot sees both books. Returned
+        filled_size is shares_held from per-fill /trades data (post-fee).
         """
         if self._dry_run:
             log.info(
-                "DRY-RUN submit_ioc side=%s price=%.4f size=%.2f token=%s cond=%s",
-                side, price, size, token_id, condition_id,
+                "DRY-RUN submit_ioc side=%s price=%.4f size=%.2f limit=%.4f token=%s cond=%s",
+                side, price, size, limit_price, token_id, condition_id,
             )
             return FillResult(
                 status="filled", order_id="DRY-RUN",
@@ -159,7 +184,6 @@ class PolymarketClient:
             )
 
         fee_rate_bps = self._fee_rate_bps(condition_id)
-        limit_price = fok_limit_price(price)
         args = MarketOrderArgs(
             token_id=token_id,
             amount=round(size * price, 2),

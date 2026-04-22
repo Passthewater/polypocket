@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from polypocket.clients.polymarket import PolymarketClient, fok_limit_price
+from polypocket.clients.polymarket import PolymarketClient, fok_limit_price, ioc_limit_price
 
 
 @pytest.fixture
@@ -192,6 +192,59 @@ def test_fok_limit_price_capped_at_99c():
     assert fok_limit_price(1.00) == 0.99
 
 
+def test_ioc_limit_price_buy_up_uses_down_best_bid():
+    """BUY UP crosses via pair-merge: limit = 1 - best_down_bid + buffer."""
+    down_bids = [
+        {"price": 0.69, "size": 100.0},
+        {"price": 0.68, "size": 200.0},
+    ]
+    limit = ioc_limit_price(
+        side="up", up_bids=[], down_bids=down_bids, buffer_ticks=5,
+    )
+    # 1 - 0.69 + 0.05 = 0.36
+    assert limit == pytest.approx(0.36)
+
+
+def test_ioc_limit_price_buy_down_uses_up_best_bid():
+    up_bids = [
+        {"price": 0.55, "size": 100.0},
+    ]
+    limit = ioc_limit_price(
+        side="down", up_bids=up_bids, down_bids=[], buffer_ticks=3,
+    )
+    # 1 - 0.55 + 0.03 = 0.48
+    assert limit == pytest.approx(0.48)
+
+
+def test_ioc_limit_price_none_when_no_opposite_bid():
+    """No counterparty on opposite side → no pair-merge possible."""
+    assert ioc_limit_price(side="up", up_bids=[], down_bids=[], buffer_ticks=5) is None
+    assert ioc_limit_price(side="up", up_bids=[], down_bids=None, buffer_ticks=5) is None
+
+
+def test_ioc_limit_price_capped_at_99c():
+    """Tiny opposite bid (e.g., 0.01) → uncapped limit would be 1.04; cap at 0.99."""
+    down_bids = [{"price": 0.01, "size": 50.0}]
+    limit = ioc_limit_price(
+        side="up", up_bids=[], down_bids=down_bids, buffer_ticks=5,
+    )
+    assert limit == 0.99
+
+
+def test_ioc_limit_price_uses_highest_opposite_bid():
+    """Multiple bids: uses the max (best) regardless of input order."""
+    down_bids = [
+        {"price": 0.50, "size": 100.0},
+        {"price": 0.72, "size": 10.0},   # best
+        {"price": 0.60, "size": 50.0},
+    ]
+    limit = ioc_limit_price(
+        side="up", up_bids=[], down_bids=down_bids, buffer_ticks=2,
+    )
+    # 1 - 0.72 + 0.02 = 0.30
+    assert limit == pytest.approx(0.30)
+
+
 def test_get_settlement_info_sums_trades(mock_clob):
     """shares_held applies fee per fill; cost sums fill size × fill price."""
     client, inst = _make_client(mock_clob)
@@ -352,7 +405,8 @@ def test_submit_ioc_full_match(mock_clob):
     ]
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND")
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
 
     assert fill.status == "filled"
     assert fill.order_id == "abc"
@@ -379,7 +433,8 @@ def test_submit_ioc_partial_match(mock_clob):
     inst.cancel.return_value = {"canceled": ["abc"]}
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND")
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
 
     assert fill.status == "filled"
     assert fill.order_id == "abc"
@@ -399,7 +454,8 @@ def test_submit_ioc_no_match_returns_rejected(mock_clob):
     inst.cancel.return_value = {"canceled": ["abc"]}
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND")
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
 
     assert fill.status == "rejected"
     assert fill.error == "gtc-no-fill"
@@ -423,7 +479,8 @@ def test_submit_ioc_settlement_failure_preserves_order_id(mock_clob):
     ]
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND")
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
 
     assert fill.status == "error"
     assert fill.order_id == "abc"
@@ -435,7 +492,8 @@ def test_submit_ioc_post_raises_returns_error(mock_clob):
     inst.create_market_order.side_effect = Exception("network down")
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND")
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
 
     assert fill.status == "error"
     assert "network" in fill.error
@@ -450,7 +508,8 @@ def test_submit_ioc_success_false_is_rejected(mock_clob):
     }
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND")
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
 
     assert fill.status == "rejected"
     assert "fee mismatch" in fill.error
@@ -472,7 +531,8 @@ def test_submit_ioc_cancel_fails_still_returns_fill(mock_clob):
     inst.cancel.side_effect = Exception("persistent")
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND")
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
 
     # Cancel failure is logged but doesn't flip success — we have a real fill.
     assert fill.status == "filled"
@@ -482,9 +542,30 @@ def test_submit_ioc_cancel_fails_still_returns_fill(mock_clob):
 def test_submit_ioc_dry_run(mock_clob):
     client, _ = _make_client(mock_clob, dry_run=True)
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN", condition_id="COND")
+                             token_id="TKN", condition_id="COND",
+                             limit_price=0.57)
     assert fill.status == "filled"
     assert fill.filled_size == 7.0
+
+
+def test_submit_ioc_uses_explicit_limit_price(mock_clob):
+    """submit_ioc must post at the caller-supplied limit_price, not fok_limit_price(price)."""
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
+    inst.get_order.return_value = {"size_matched": "7.0", "associate_trades": []}
+
+    # price=0.51, limit_price=0.42 (below same-side ask — pair-merge scenario)
+    client.submit_ioc(side="up", price=0.51, size=7.0,
+                      token_id="TKN-UP", condition_id="0xCOND",
+                      limit_price=0.42)
+
+    args = inst.create_market_order.call_args.args[0]
+    assert args.price == pytest.approx(0.42)
+    # amount still uses price (the display/budget price), not limit_price
+    assert args.amount == pytest.approx(round(7.0 * 0.51, 2))
 
 
 def test_submit_ioc_full_match_with_rounding_tolerance(mock_clob):
@@ -508,7 +589,8 @@ def test_submit_ioc_full_match_with_rounding_tolerance(mock_clob):
     ]
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND")
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
 
     assert fill.status == "filled"
     inst.cancel.assert_not_called()

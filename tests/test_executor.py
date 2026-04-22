@@ -203,10 +203,11 @@ class RecordingLiveOrderClient:
             filled_size=size, avg_price=price, error=None,
         )
 
-    def submit_ioc(self, side, price, size, token_id, condition_id):
+    def submit_ioc(self, side, price, size, token_id, condition_id, limit_price):
         self.calls.append({
             "side": side, "price": price, "size": size,
             "token_id": token_id, "condition_id": condition_id,
+            "limit_price": limit_price,
         })
         return FillResult(
             status="filled", order_id=f"ord-{len(self.calls)}",
@@ -230,7 +231,7 @@ class RejectingLiveOrderClient:
             filled_size=0.0, avg_price=None, error=self._error,
         )
 
-    def submit_ioc(self, side, price, size, token_id, condition_id):
+    def submit_ioc(self, side, price, size, token_id, condition_id, limit_price):
         self.calls += 1
         return FillResult(
             status="rejected", order_id=None,
@@ -262,6 +263,7 @@ def test_live_trade_threads_args_to_client():
         token_id="TKN-DOWN",
         condition_id="0xcond",
         client=client,
+        limit_price=0.51,
     )
 
     assert result.success is True
@@ -272,6 +274,7 @@ def test_live_trade_threads_args_to_client():
             "size": 5.0,
             "token_id": "TKN-DOWN",
             "condition_id": "0xcond",
+            "limit_price": 0.51,
         }
     ]
     trade = find_trade_by_window_slug(db_path, "eth-5m-999")
@@ -304,6 +307,7 @@ def test_duplicate_live_trade_rejection_does_not_submit_again():
         token_id="TKN-UP",
         condition_id="0xcond",
         client=client,
+        limit_price=0.57,
     )
     assert first.success is True
     assert len(client.calls) == 1
@@ -317,6 +321,7 @@ def test_duplicate_live_trade_rejection_does_not_submit_again():
         token_id="TKN-UP",
         condition_id="0xcond",
         client=client,
+        limit_price=0.57,
     )
 
     assert second.success is False
@@ -353,6 +358,7 @@ def test_live_trade_race_on_insert_returns_consumed_existing_trade(monkeypatch):
         token_id="TKN-UP",
         condition_id="0xcond",
         client=client,
+        limit_price=0.57,
     )
 
     trade = find_trade_by_window_slug(db_path, "sol-5m-race")
@@ -385,7 +391,7 @@ def test_live_trade_insufficient_balance_writes_no_row():
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.51, size=7.0,
         window_slug="btc-5m-nb", token_id="TKN-UP", condition_id="0xcond",
-        client=InsufficientBalanceClient(),
+        client=InsufficientBalanceClient(), limit_price=0.57,
     )
     assert result.success is False
     assert result.error == "insufficient-balance"
@@ -401,6 +407,7 @@ def test_live_trade_filled_writes_external_order_id():
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.51, size=7.0,
         window_slug="btc-5m-fill", token_id="TKN-UP", condition_id="0xcond", client=client,
+        limit_price=0.57,
     )
     assert result.success is True
     trade = find_trade_by_window_slug(db_path, "btc-5m-fill")
@@ -417,6 +424,7 @@ def test_live_trade_rejected_marks_trade_rejected_with_error():
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.44, size=4.0,
         window_slug="btc-5m-rej", token_id="TKN-DOWN", condition_id="0xcond", client=client,
+        limit_price=0.50,
     )
     assert result.success is False
     assert result.error == "no match"
@@ -441,9 +449,10 @@ class SettlingLiveOrderClient:
         return FillResult(status="filled", order_id=f"ord-{len(self.calls)}",
                           filled_size=size, avg_price=price, error=None)
 
-    def submit_ioc(self, side, price, size, token_id, condition_id):
+    def submit_ioc(self, side, price, size, token_id, condition_id, limit_price):
         self.calls.append({"side": side, "price": price, "size": size,
-                           "token_id": token_id, "condition_id": condition_id})
+                           "token_id": token_id, "condition_id": condition_id,
+                           "limit_price": limit_price})
         return FillResult(status="filled", order_id=f"ord-{len(self.calls)}",
                           filled_size=size, avg_price=price, error=None)
 
@@ -577,6 +586,7 @@ def test_live_trade_client_error_marks_trade_rejected():
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.51, size=7.0,
         window_slug="btc-5m-err", token_id="TKN-UP", condition_id="0xcond", client=ErroringClient(),
+        limit_price=0.57,
     )
     assert result.success is False
     assert "network" in result.error
@@ -713,7 +723,7 @@ def test_execute_live_trade_uses_submit_ioc():
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.51,
         size=7.0, window_slug="w1", token_id="T", condition_id="C",
-        client=client,
+        client=client, limit_price=0.57,
     )
 
     assert result.success
@@ -736,7 +746,7 @@ def test_execute_live_trade_partial_fill_persists_actual_size():
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.51,
         size=7.0, window_slug="w2", token_id="T", condition_id="C",
-        client=client,
+        client=client, limit_price=0.57,
     )
 
     assert result.success
@@ -766,7 +776,7 @@ def test_execute_live_trade_error_with_order_id_persists_order_id():
     result = execute_live_trade(
         db_path=db_path, signal=signal, entry_price=0.51,
         size=7.0, window_slug="w-err-oid", token_id="T", condition_id="C",
-        client=client,
+        client=client, limit_price=0.57,
     )
 
     assert result.success is False
@@ -794,7 +804,7 @@ def test_execute_live_trade_logs_dust_warning(caplog):
         result = execute_live_trade(
             db_path=db_path, signal=signal, entry_price=0.61,
             size=7.0, window_slug="w3", token_id="T", condition_id="C",
-            client=client,
+            client=client, limit_price=0.67,
         )
 
     assert result.success

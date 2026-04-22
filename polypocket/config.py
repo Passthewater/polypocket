@@ -85,6 +85,13 @@ LIVE_DB_PATH = "live_trades.db"
 # during 200–500ms signal→post latency on 5m BTC books; the depth check in
 # bot.py ensures the extra tick stays affordable.
 FOK_SLIPPAGE_TICKS = int(os.getenv("FOK_SLIPPAGE_TICKS", "3"))
+# IOC buffer added to the pair-merge clearing price. For a BUY UP, the
+# implied clearing price is `1 - best_down_bid`, and we post at that plus
+# this many ticks to absorb DOWN-book churn during the ~200–500 ms signing
+# window. Start 8 ticks (conservative; prior same-side FOK at 6 ticks still
+# killed on every reject, and the pair-merge limit is a different axis so
+# headroom is valuable for session 1). Tune via IOC_BUFFER_TICKS env var.
+IOC_BUFFER_TICKS = int(os.getenv("IOC_BUFFER_TICKS", "8"))
 # Fraction of book depth (at <= FOK limit price) we ask for as our FOK
 # size. Leaves headroom for the book to thin between our depth read and
 # the signed order reaching the matcher. 0.9 = ask for at most 90% of

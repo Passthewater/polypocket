@@ -104,3 +104,40 @@ def test_parse_book_event_empty_asks():
     result = parse_book_event(msg)
     assert result["top_asks"] == []
     assert result["best_ask"] is None
+
+
+def test_parse_book_event_extracts_top_3_bids_descending():
+    """Bids must be returned highest-first; needed for pair-merge limit."""
+    msg = {
+        "asset_id": "tok_up",
+        "asks": [],
+        "bids": [
+            {"price": "0.40", "size": "50"},
+            {"price": "0.45", "size": "120"},
+            {"price": "0.42", "size": "80"},
+            {"price": "0.30", "size": "200"},
+            {"price": "0.44", "size": "90"},
+        ],
+    }
+    result = parse_book_event(msg)
+    assert result["best_bid"] == 0.45
+    assert result["best_bid_size"] == 120.0
+    assert len(result["top_bids"]) == 3
+    assert result["top_bids"][0] == {"price": 0.45, "size": 120.0}
+    assert result["top_bids"][1] == {"price": 0.44, "size": 90.0}
+    assert result["top_bids"][2] == {"price": 0.42, "size": 80.0}
+
+
+def test_parse_book_event_empty_bids():
+    msg = {"asset_id": "tok_up", "asks": [], "bids": []}
+    result = parse_book_event(msg)
+    assert result["top_bids"] == []
+    assert result["best_bid"] is None
+
+
+def test_parse_book_event_missing_bids_key():
+    """Legacy events without a bids field must return empty bid state, not KeyError."""
+    msg = {"asset_id": "tok_up", "asks": [{"price": "0.55", "size": "10"}]}
+    result = parse_book_event(msg)
+    assert result["top_bids"] == []
+    assert result["best_bid"] is None

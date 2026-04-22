@@ -1018,7 +1018,7 @@ async def test_live_mode_threads_up_token_id(tmp_path: Path, monkeypatch):
                 filled_size=size, avg_price=price, error=None,
             )
 
-        def submit_ioc(self, side, price, size, token_id, condition_id):
+        def submit_ioc(self, side, price, size, token_id, condition_id, limit_price):
             self.calls.append({"side": side, "token_id": token_id, "condition_id": condition_id})
             return FillResult(
                 status="filled", order_id="ord-test",
@@ -1055,6 +1055,8 @@ async def test_live_mode_threads_up_token_id(tmp_path: Path, monkeypatch):
         down_ask=0.45,
         up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 1000.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1094,8 +1096,8 @@ class _CapturingClient:
         return FillResult(status="filled", order_id="x",
                           filled_size=size, avg_price=price, error=None)
 
-    def submit_ioc(self, side, price, size, token_id, condition_id):
-        self.calls.append({"side": side, "size": size})
+    def submit_ioc(self, side, price, size, token_id, condition_id, limit_price):
+        self.calls.append({"side": side, "size": size, "limit_price": limit_price})
         return FillResult(status="filled", order_id="x",
                           filled_size=size, avg_price=price, error=None)
 
@@ -1119,6 +1121,8 @@ async def test_bot_live_skips_when_book_stale(tmp_path: Path, monkeypatch):
         up_ask=0.55, down_ask=0.45,
         up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 1000.0}],
         book_updated_at=time.monotonic() - 10.0,  # 10s old
     )
 
@@ -1143,6 +1147,8 @@ async def test_bot_live_skips_when_book_age_none(tmp_path: Path, monkeypatch):
         price_to_beat=84198.0,
         up_ask=0.55, down_ask=0.45,
         up_book=[{"price": 0.55, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 1000.0}],
         book_updated_at=None,
     )
 
@@ -1168,6 +1174,8 @@ async def test_bot_live_submits_when_book_deep_and_fresh(tmp_path: Path, monkeyp
         up_ask=0.55, down_ask=0.45,
         up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 1000.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1202,6 +1210,8 @@ async def test_bot_live_downsizes_when_balance_below_max(tmp_path: Path, monkeyp
         up_ask=0.55, down_ask=0.45,
         up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 1000.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1234,6 +1244,8 @@ async def test_bot_live_skips_when_balance_below_min_position(tmp_path: Path, mo
         up_ask=0.55, down_ask=0.45,
         up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 1000.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1259,8 +1271,9 @@ async def test_bot_live_clamps_size_when_book_shallow(tmp_path: Path, monkeypatc
 
     # With edge=0.20, vol_scale=1 (sigma forced to 0.001 floor), intended =
     # MAX_POSITION_USDC / entry = ~10.9 shares at $0.55.
-    # Book holds 11 shares at <= FOK limit (0.55 + 3 ticks = 0.58).
-    # Floor gate: 11 * 0.55 * 0.5 = 3.025 >= 3.0 -> passes.
+    # DOWN-bids hold 11 shares at 0.45 (best). limit = 1 - 0.45 + 0.08 = 0.63.
+    # threshold = 0.37 -> all 11 shares pair-merge-eligible, fillable = 11.
+    # Floor gate: 11 * 0.63 * 0.5 = 3.465 >= 3.0 -> passes.
     # Clamp: min(10.9, 11*0.9=9.9) = 9.9 < 10.9 -> clamp engages.
     window = Window(
         condition_id="shallow-test",
@@ -1270,11 +1283,10 @@ async def test_bot_live_clamps_size_when_book_shallow(tmp_path: Path, monkeypatc
         slug="btc-updown-5m-shallow",
         price_to_beat=84198.0,
         up_ask=0.55, down_ask=0.45,
-        up_book=[
-            {"price": 0.55, "size": 11.0},
-            {"price": 0.70, "size": 1000.0},  # outside limit band
-        ],
+        up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 11.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1302,6 +1314,8 @@ async def test_bot_live_submits_intended_when_book_deep(tmp_path: Path, monkeypa
         up_ask=0.55, down_ask=0.45,
         up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 1000.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1324,9 +1338,8 @@ async def test_bot_live_skips_when_depth_below_min_fill_ratio(
     client = _CapturingClient()
     bot = _make_live_bot(tmp_path, monkeypatch, client)
 
-    # Same shape as the old test_bot_live_skips_when_book_too_thin: only
-    # 3 shares at <= limit. With intended ~ 18 shares, clamp would give
-    # 3*0.9=2.7, which is 2.7/18 = 0.15 < MIN_FILL_RATIO (0.5) -> skip.
+    # Only 3 shares of DOWN-bid depth pair-merge-eligible. limit=0.63,
+    # fillable=3. Floor gate: 3 * 0.63 * 0.5 = 0.945 < $5 -> skip.
     window = Window(
         condition_id="thin-test",
         question="BTC Up or Down",
@@ -1335,12 +1348,10 @@ async def test_bot_live_skips_when_depth_below_min_fill_ratio(
         slug="btc-updown-5m-thin",
         price_to_beat=84198.0,
         up_ask=0.55, down_ask=0.45,
-        up_book=[
-            {"price": 0.55, "size": 2.0},
-            {"price": 0.56, "size": 1.0},
-            {"price": 0.70, "size": 1000.0},
-        ],
+        up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 3.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1351,8 +1362,8 @@ async def test_bot_live_skips_when_depth_below_min_fill_ratio(
 
 
 @pytest.mark.asyncio
-async def test_bot_live_skips_when_book_empty(tmp_path: Path, monkeypatch):
-    """Empty book / None -> skip book-too-thin (fillable=0)."""
+async def test_bot_live_skips_when_opposite_bids_empty(tmp_path: Path, monkeypatch):
+    """No opp-side bids -> no pair-merge counterparty -> skip (not a thin-book reject)."""
     client = _CapturingClient()
     bot = _make_live_bot(tmp_path, monkeypatch, client)
 
@@ -1364,15 +1375,17 @@ async def test_bot_live_skips_when_book_empty(tmp_path: Path, monkeypatch):
         slug="btc-updown-5m-empty",
         price_to_beat=84198.0,
         up_ask=0.55, down_ask=0.45,
-        up_book=[],
+        up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[],
         book_updated_at=time.monotonic(),
     )
 
     await bot._on_book_update(window, "up")
 
     assert client.calls == []
-    assert bot._window_skip_reason == "book-too-thin"
+    assert bot._window_skip_reason == "no-pair-merge-counterparty"
 
 
 @pytest.mark.asyncio
@@ -1402,9 +1415,11 @@ async def test_bot_live_skips_when_clamped_size_below_min_position_usdc(
         slug="btc-updown-5m-floor",
         price_to_beat=84198.0,
         up_ask=0.55, down_ask=0.45,
-        # fillable=8. clamped=7.2. 7.2*0.55=$3.96 < $5 floor.
-        up_book=[{"price": 0.55, "size": 8.0}, {"price": 0.70, "size": 1000.0}],
+        # fillable=8 on DOWN-bid side. limit=0.63. 8*0.63*0.5=$2.52 < $5 floor.
+        up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 8.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1418,10 +1433,10 @@ async def test_bot_live_skips_when_clamped_size_below_min_position_usdc(
 async def test_bot_floor_gate_engages_when_fillable_below_min_position(
     tmp_path: Path, monkeypatch
 ):
-    """Pre-trade gate skips when fillable * entry_price * MIN_FILL_RATIO < MIN_POSITION_USDC.
+    """Pre-trade gate skips when fillable * limit_price * MIN_FILL_RATIO < MIN_POSITION_USDC.
 
-    MIN_POSITION_USDC=5, entry=0.50, MIN_FILL_RATIO=0.5 (default).
-    fillable=10: 10 * 0.50 * 0.5 = 2.5 < 5 -> skip.
+    MIN_POSITION_USDC=5, down_bid=0.50, IOC_BUFFER_TICKS=8 -> limit=0.58.
+    fillable=10: 10 * 0.58 * 0.5 = 2.9 < 5 -> skip.
     """
     monkeypatch.setattr("polypocket.bot.MIN_POSITION_USDC", 5.0, raising=False)
     client = _CapturingClient()
@@ -1435,9 +1450,10 @@ async def test_bot_floor_gate_engages_when_fillable_below_min_position(
         slug="btc-updown-5m-gate-engages",
         price_to_beat=84198.0,
         up_ask=0.50, down_ask=0.50,
-        # fillable=10 at price 0.50: 10 * 0.50 * 0.5 = 2.5 < 5 -> skip
-        up_book=[{"price": 0.50, "size": 10.0}, {"price": 0.70, "size": 1000.0}],
+        up_book=[{"price": 0.50, "size": 1000.0}],
         down_book=[{"price": 0.50, "size": 1000.0}],
+        up_bids=[{"price": 0.50, "size": 1000.0}],
+        down_bids=[{"price": 0.50, "size": 10.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1451,10 +1467,10 @@ async def test_bot_floor_gate_engages_when_fillable_below_min_position(
 async def test_bot_floor_gate_passes_at_boundary(
     tmp_path: Path, monkeypatch
 ):
-    """At the floor boundary, the gate allows the trade through.
+    """Above the floor boundary, the gate allows the trade through.
 
-    MIN_POSITION_USDC=5, entry=0.50, MIN_FILL_RATIO=0.5.
-    fillable=20: 20 * 0.50 * 0.5 = 5.0 >= 5 -> passes gate.
+    MIN_POSITION_USDC=5, down_bid=0.50, limit=0.58.
+    fillable=20: 20 * 0.58 * 0.5 = 5.8 >= 5 -> passes gate.
     """
     monkeypatch.setattr("polypocket.bot.MIN_POSITION_USDC", 5.0, raising=False)
     client = _CapturingClient()
@@ -1468,9 +1484,10 @@ async def test_bot_floor_gate_passes_at_boundary(
         slug="btc-updown-5m-gate-boundary",
         price_to_beat=84198.0,
         up_ask=0.50, down_ask=0.50,
-        # fillable=20 at price 0.50: 20 * 0.50 * 0.5 = 5.0 >= 5 -> pass
-        up_book=[{"price": 0.50, "size": 20.0}, {"price": 0.70, "size": 1000.0}],
+        up_book=[{"price": 0.50, "size": 1000.0}],
         down_book=[{"price": 0.50, "size": 1000.0}],
+        up_bids=[{"price": 0.50, "size": 1000.0}],
+        down_bids=[{"price": 0.50, "size": 20.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1498,6 +1515,8 @@ async def test_bot_emits_ioc_diagnostic_log_line(tmp_path: Path, monkeypatch, ca
         up_ask=0.55, down_ask=0.45,
         up_book=[{"price": 0.55, "size": 1000.0}],
         down_book=[{"price": 0.45, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.45, "size": 1000.0}],
         book_updated_at=time.monotonic(),
     )
 
@@ -1510,3 +1529,34 @@ async def test_bot_emits_ioc_diagnostic_log_line(tmp_path: Path, monkeypatch, ca
     assert "target=" in msg
     assert "fillable=" in msg
     assert "limit=" in msg
+
+
+@pytest.mark.asyncio
+async def test_bot_passes_pair_merge_limit_price_to_submit(tmp_path: Path, monkeypatch):
+    """Submitted limit_price must be computed from the opposite book via
+    ioc_limit_price, not the same-side ask."""
+    from polypocket.config import IOC_BUFFER_TICKS
+    client = _CapturingClient()
+    bot = _make_live_bot(tmp_path, monkeypatch, client)
+
+    window = Window(
+        condition_id="pairmerge-test",
+        question="BTC Up or Down",
+        up_token_id="UP", down_token_id="DOWN",
+        end_time=time.time() + 180,
+        slug="btc-updown-5m-pairmerge",
+        price_to_beat=84198.0,
+        up_ask=0.55, down_ask=0.40,
+        up_book=[{"price": 0.55, "size": 1000.0}],
+        down_book=[{"price": 0.40, "size": 1000.0}],
+        up_bids=[{"price": 0.55, "size": 1000.0}],
+        down_bids=[{"price": 0.60, "size": 1000.0}],  # DOWN-bid at 0.60
+        book_updated_at=time.monotonic(),
+    )
+
+    await bot._on_book_update(window, "up")
+
+    assert len(client.calls) == 1
+    # limit_price = 1 - 0.60 + IOC_BUFFER_TICKS*0.01
+    expected = round(min(0.99, (1.0 - 0.60) + IOC_BUFFER_TICKS * 0.01), 2)
+    assert client.calls[0]["limit_price"] == pytest.approx(expected)
