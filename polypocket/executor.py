@@ -232,7 +232,7 @@ def execute_live_trade(
             return consumed
         raise
 
-    fill = client.submit_fok(
+    fill = client.submit_ioc(
         side=signal.side,
         price=entry_price,
         size=size,
@@ -244,10 +244,13 @@ def execute_live_trade(
         update_trade(
             db_path, trade_id, outcome=None, pnl=None, status="open",
             external_order_id=fill.order_id,
+            size=fill.filled_size,
+            entry_price=fill.avg_price,
         )
         log.info(
-            "Live fill: %s %s @%.4f x%.2f token=%s order=%s",
-            window_slug, signal.side, entry_price, size, token_id, fill.order_id,
+            "Live fill: %s %s requested=%.2f filled=%.4f vwap=$%.4f token=%s order=%s",
+            window_slug, signal.side, size, fill.filled_size,
+            fill.avg_price, token_id, fill.order_id,
         )
         return TradeResult(success=True, trade_id=trade_id, pnl=None)
 

@@ -1,8 +1,10 @@
+import logging
 import os
 import sqlite3
 import tempfile
 
 import pytest
+from unittest.mock import MagicMock
 
 from polypocket.executor import (
     FillResult,
@@ -201,6 +203,16 @@ class RecordingLiveOrderClient:
             filled_size=size, avg_price=price, error=None,
         )
 
+    def submit_ioc(self, side, price, size, token_id, condition_id):
+        self.calls.append({
+            "side": side, "price": price, "size": size,
+            "token_id": token_id, "condition_id": condition_id,
+        })
+        return FillResult(
+            status="filled", order_id=f"ord-{len(self.calls)}",
+            filled_size=size, avg_price=price, error=None,
+        )
+
     def get_usdc_balance(self):
         return self._balance
 
@@ -212,6 +224,13 @@ class RejectingLiveOrderClient:
         self._error = error
 
     def submit_fok(self, side, price, size, token_id, condition_id):
+        self.calls += 1
+        return FillResult(
+            status="rejected", order_id=None,
+            filled_size=0.0, avg_price=None, error=self._error,
+        )
+
+    def submit_ioc(self, side, price, size, token_id, condition_id):
         self.calls += 1
         return FillResult(
             status="rejected", order_id=None,
@@ -352,6 +371,9 @@ class InsufficientBalanceClient:
     def submit_fok(self, **kwargs):
         raise AssertionError("submit_fok must not be called when balance check fails")
 
+    def submit_ioc(self, **kwargs):
+        raise AssertionError("submit_ioc must not be called when balance check fails")
+
     def get_usdc_balance(self):
         return 0.50
 
@@ -414,6 +436,12 @@ class SettlingLiveOrderClient:
         self.settlement_lookups: list[str] = []
 
     def submit_fok(self, side, price, size, token_id, condition_id):
+        self.calls.append({"side": side, "price": price, "size": size,
+                           "token_id": token_id, "condition_id": condition_id})
+        return FillResult(status="filled", order_id=f"ord-{len(self.calls)}",
+                          filled_size=size, avg_price=price, error=None)
+
+    def submit_ioc(self, side, price, size, token_id, condition_id):
         self.calls.append({"side": side, "price": price, "size": size,
                            "token_id": token_id, "condition_id": condition_id})
         return FillResult(status="filled", order_id=f"ord-{len(self.calls)}",
@@ -537,6 +565,9 @@ def test_live_trade_client_error_marks_trade_rejected():
         def submit_fok(self, **kwargs):
             return FillResult(status="error", order_id=None, filled_size=0.0,
                               avg_price=None, error="network: timeout")
+        def submit_ioc(self, **kwargs):
+            return FillResult(status="error", order_id=None, filled_size=0.0,
+                              avg_price=None, error="network: timeout")
         def get_usdc_balance(self):
             return 1000.0
 
@@ -654,4 +685,62 @@ def test_reconcile_clob_error_preserves_local_status():
 
     assert result == "reserved"
     assert find_trade_by_window_slug(db_path, "btc-5m-rec-err")["status"] == "reserved"
+    os.unlink(db_path)
+
+
+def _sample_signal():
+    return Signal(
+        side="up",
+        model_p_up=0.72,
+        market_price=0.51,
+        edge=0.21,
+        up_edge=0.21,
+        down_edge=-0.21,
+    )
+
+
+def test_execute_live_trade_uses_submit_ioc():
+    """Verify executor calls submit_ioc, not submit_fok."""
+    db_path = make_db()
+    signal = _sample_signal()
+    client = MagicMock()
+    client.get_usdc_balance.return_value = 100.0
+    client.submit_ioc.return_value = FillResult(
+        status="filled", order_id="abc",
+        filled_size=7.0, avg_price=0.51, error=None,
+    )
+
+    result = execute_live_trade(
+        db_path=db_path, signal=signal, entry_price=0.51,
+        size=7.0, window_slug="w1", token_id="T", condition_id="C",
+        client=client,
+    )
+
+    assert result.success
+    client.submit_ioc.assert_called_once()
+    client.submit_fok.assert_not_called()
+    os.unlink(db_path)
+
+
+def test_execute_live_trade_partial_fill_persists_actual_size():
+    """Partial fill: ledger row reflects filled_size, not requested size."""
+    db_path = make_db()
+    signal = _sample_signal()
+    client = MagicMock()
+    client.get_usdc_balance.return_value = 100.0
+    client.submit_ioc.return_value = FillResult(
+        status="filled", order_id="abc",
+        filled_size=3.5, avg_price=0.52, error=None,
+    )
+
+    result = execute_live_trade(
+        db_path=db_path, signal=signal, entry_price=0.51,
+        size=7.0, window_slug="w2", token_id="T", condition_id="C",
+        client=client,
+    )
+
+    assert result.success
+    row = find_trade_by_window_slug(db_path, "w2")
+    assert row["size"] == pytest.approx(3.5)
+    assert row["entry_price"] == pytest.approx(0.52)
     os.unlink(db_path)

@@ -1018,6 +1018,13 @@ async def test_live_mode_threads_up_token_id(tmp_path: Path, monkeypatch):
                 filled_size=size, avg_price=price, error=None,
             )
 
+        def submit_ioc(self, side, price, size, token_id, condition_id):
+            self.calls.append({"side": side, "token_id": token_id, "condition_id": condition_id})
+            return FillResult(
+                status="filled", order_id="ord-test",
+                filled_size=size, avg_price=price, error=None,
+            )
+
         def get_usdc_balance(self):
             return 1000.0
 
@@ -1083,6 +1090,11 @@ class _CapturingClient:
         self.calls = []
 
     def submit_fok(self, side, price, size, token_id, condition_id):
+        self.calls.append({"side": side, "size": size})
+        return FillResult(status="filled", order_id="x",
+                          filled_size=size, avg_price=price, error=None)
+
+    def submit_ioc(self, side, price, size, token_id, condition_id):
         self.calls.append({"side": side, "size": size})
         return FillResult(status="filled", order_id="x",
                           filled_size=size, avg_price=price, error=None)

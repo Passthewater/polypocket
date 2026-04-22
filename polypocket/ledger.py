@@ -229,6 +229,8 @@ def update_trade(
     status: str,
     external_order_id: str | None = None,
     error: str | None = None,
+    size: float | None = None,
+    entry_price: float | None = None,
 ) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute(
@@ -236,10 +238,12 @@ def update_trade(
             UPDATE trades
             SET outcome = ?, pnl = ?, status = ?,
                 external_order_id = COALESCE(?, external_order_id),
-                error = COALESCE(?, error)
+                error = COALESCE(?, error),
+                size = COALESCE(?, size),
+                entry_price = COALESCE(?, entry_price)
             WHERE id = ?
             """,
-            (outcome, pnl, status, external_order_id, error, trade_id),
+            (outcome, pnl, status, external_order_id, error, size, entry_price, trade_id),
         )
         conn.commit()
 
