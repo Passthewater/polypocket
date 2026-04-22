@@ -140,6 +140,92 @@ class PolymarketClient:
             avg_price=price, error=None,
         )
 
+    def submit_ioc(self, side, price, size, token_id, condition_id):
+        """Post GTC at FOK-limit price, immediately cancel remainder.
+
+        True-IOC semantic layered on GTC since py_clob_client doesn't expose
+        IOC natively. Any match at <= fok_limit_price fills (within slippage
+        budget by construction); remainder is cancelled. Returned filled_size
+        is shares_held from per-fill /trades data (post-fee).
+        """
+        if self._dry_run:
+            log.info(
+                "DRY-RUN submit_ioc side=%s price=%.4f size=%.2f token=%s cond=%s",
+                side, price, size, token_id, condition_id,
+            )
+            return FillResult(
+                status="filled", order_id="DRY-RUN",
+                filled_size=size, avg_price=price, error=None,
+            )
+
+        fee_rate_bps = self._fee_rate_bps(condition_id)
+        limit_price = fok_limit_price(price)
+        args = MarketOrderArgs(
+            token_id=token_id,
+            amount=round(size * price, 2),
+            price=limit_price,
+            fee_rate_bps=fee_rate_bps,
+        )
+
+        try:
+            signed = self._client.create_market_order(args)
+            resp = self._client.post_order(signed, OrderType.GTC)
+        except Exception as exc:
+            log.exception("submit_ioc network/signing error")
+            return FillResult(
+                status="error", order_id=None, filled_size=0.0,
+                avg_price=None, error=f"network: {exc}",
+            )
+
+        if not resp.get("success"):
+            err = resp.get("errorMsg") or f"status={resp.get('status')!r}"
+            return FillResult(
+                status="rejected", order_id=None, filled_size=0.0,
+                avg_price=None, error=err,
+            )
+
+        order_id = resp.get("orderID")
+        if not order_id:
+            return FillResult(
+                status="rejected", order_id=None, filled_size=0.0,
+                avg_price=None, error="no-order-id",
+            )
+
+        # Check how much matched before deciding whether to cancel remainder.
+        # Skip cancel if order fully matched (server errors on cancel-of-filled).
+        try:
+            order_status = self._client.get_order(order_id)
+            size_matched = float(order_status.get("size_matched", 0) or 0)
+        except Exception as exc:
+            log.warning("submit_ioc: get_order check failed for %s: %s", order_id, exc)
+            size_matched = 0.0
+
+        fully_matched = size_matched >= size - 1e-9
+        if not fully_matched:
+            self.cancel_order(order_id)
+
+        # Derive real fill from per-fill /trades data (post-fee shares).
+        try:
+            info = self.get_settlement_info(order_id)
+        except Exception as exc:
+            log.warning("submit_ioc: get_settlement_info failed for %s: %s", order_id, exc)
+            return FillResult(
+                status="error", order_id=order_id, filled_size=0.0,
+                avg_price=None, error=f"settlement-lookup: {exc}",
+            )
+
+        if info.shares_held <= 0:
+            return FillResult(
+                status="rejected", order_id=order_id, filled_size=0.0,
+                avg_price=None, error="gtc-no-fill",
+            )
+
+        avg_price = info.cost_usdc / info.shares_held if info.shares_held > 0 else price
+        return FillResult(
+            status="filled", order_id=order_id,
+            filled_size=info.shares_held, avg_price=avg_price, error=None,
+        )
+
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a resting order. Retries on transient errors.
 

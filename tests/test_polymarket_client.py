@@ -335,3 +335,128 @@ def test_cancel_order_gives_up_after_retries(mock_clob):
     ok = client.cancel_order("abc")
     assert ok is False
     assert inst.cancel.call_count == 3  # 1 + 2 retries (CANCEL_RETRY_MAX=2)
+
+
+def test_submit_ioc_full_match(mock_clob):
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
+    # get_order returns fully-matched (size_matched == size)
+    inst.get_order.return_value = {
+        "size_matched": "7.0",
+        "associate_trades": ["t1"],
+    }
+    inst.get_trades.return_value = [
+        {"taker_order_id": "abc", "size": "7.0", "price": "0.51", "fee_rate_bps": 1000},
+    ]
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND")
+
+    assert fill.status == "filled"
+    assert fill.order_id == "abc"
+    # shares_held = 7.0 * (1 - 0.10) = 6.3
+    assert fill.filled_size == pytest.approx(6.3, abs=0.001)
+    inst.cancel.assert_not_called()
+
+
+def test_submit_ioc_partial_match(mock_clob):
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    # Server says "matched" but get_order shows a smaller size_matched than
+    # we asked for — realistic response when only part of the book crossed.
+    inst.post_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
+    inst.get_order.return_value = {
+        "size_matched": "3.0",
+        "associate_trades": ["t1"],
+    }
+    inst.get_trades.return_value = [
+        {"taker_order_id": "abc", "size": "3.0", "price": "0.51", "fee_rate_bps": 1000},
+    ]
+    inst.cancel.return_value = {"canceled": ["abc"]}
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND")
+
+    assert fill.status == "filled"
+    assert fill.filled_size == pytest.approx(2.7, abs=0.001)  # 3.0 * 0.9
+    inst.cancel.assert_called_once()
+
+
+def test_submit_ioc_no_match_returns_rejected(mock_clob):
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {
+        "success": True, "status": "unmatched", "orderID": "abc",
+    }
+    inst.get_order.return_value = {"size_matched": "0", "associate_trades": []}
+    inst.cancel.return_value = {"canceled": ["abc"]}
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND")
+
+    assert fill.status == "rejected"
+    assert fill.error == "gtc-no-fill"
+    assert fill.filled_size == 0.0
+    inst.cancel.assert_called_once()
+
+
+def test_submit_ioc_post_raises_returns_error(mock_clob):
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.side_effect = Exception("network down")
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND")
+
+    assert fill.status == "error"
+    assert "network" in fill.error
+    inst.cancel.assert_not_called()
+
+
+def test_submit_ioc_success_false_is_rejected(mock_clob):
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {
+        "success": False, "errorMsg": "fee mismatch",
+    }
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND")
+
+    assert fill.status == "rejected"
+    assert "fee mismatch" in fill.error
+    inst.cancel.assert_not_called()
+
+
+def test_submit_ioc_cancel_fails_still_returns_fill(mock_clob):
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
+    inst.get_order.return_value = {
+        "size_matched": "3.0", "associate_trades": ["t1"],
+    }
+    inst.get_trades.return_value = [
+        {"taker_order_id": "abc", "size": "3.0", "price": "0.51", "fee_rate_bps": 1000},
+    ]
+    inst.cancel.side_effect = Exception("persistent")
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND")
+
+    # Cancel failure is logged but doesn't flip success — we have a real fill.
+    assert fill.status == "filled"
+    assert fill.filled_size == pytest.approx(2.7, abs=0.001)
+
+
+def test_submit_ioc_dry_run(mock_clob):
+    client, _ = _make_client(mock_clob, dry_run=True)
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN", condition_id="COND")
+    assert fill.status == "filled"
+    assert fill.filled_size == 7.0
