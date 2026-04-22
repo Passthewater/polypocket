@@ -37,12 +37,17 @@ def fok_limit_price(price: float) -> float:
 
 
 def _tick_safe_size(target_size: int, limit_price: float, search: int = 6) -> int | None:
-    """Pick an integer size where amount = size*limit survives py_clob_client's
-    float-based round_down. Some (size, limit) combos produce amount values like
-    4.06 whose float rep is 4.05999...; py_clob_client's round_down then floors
-    into the previous cent, corrupting the reconstructed taker and tripping
-    the server's 0.01 tick check. Searches ±search around target and returns
-    the first safe size, or None.
+    """Pick an integer size where amount = round(size*limit, 2) survives
+    py_clob_client's float-based round_down. Some (size, limit) combos produce
+    amount values like 4.56 whose float rep is 4.5599999...; py_clob_client's
+    round_down then floors into the previous cent, corrupting the reconstructed
+    taker and tripping the server's 0.01 tick check. Searches ±search around
+    target and returns the first safe size, or None.
+
+    Critical: the check must go through `round(..., 2)` first, since
+    `(s * limit) * 100` and `round(s * limit, 2) * 100` often have different
+    float representations (e.g., 12 * 0.38 = 4.5600000000000005 positive-drift,
+    but round(that, 2) * 100 = 455.9999...94 negative-drift).
     """
     candidates = [target_size]
     for d in range(1, search + 1):
@@ -50,7 +55,8 @@ def _tick_safe_size(target_size: int, limit_price: float, search: int = 6) -> in
     for s in candidates:
         if s < 1:
             continue
-        scaled = (s * limit_price) * 100
+        amount = round(s * limit_price, 2)
+        scaled = amount * 100
         if math.floor(scaled) == round(scaled):
             return s
     return None

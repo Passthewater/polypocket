@@ -579,12 +579,12 @@ def test_tick_safe_size_picks_target_when_clean():
 
 
 def test_tick_safe_size_shifts_when_target_drifts():
-    """target=7 at limit=0.58: 7*0.58=4.06 scaled to 405.9999 (drift).
-    Search finds 8 (also drifts) then 9 (clean)."""
-    result = _tick_safe_size(7, 0.58)
-    # Must return a value where size * 0.58 passes the floor-vs-round check
+    """target=7 at limit=0.58 drifts; search must land on a safe neighbor.
+    Must use the same check path as production: round(size*limit, 2)*100."""
     import math
-    scaled = result * 0.58 * 100
+    result = _tick_safe_size(7, 0.58)
+    amount = round(result * 0.58, 2)
+    scaled = amount * 100
     assert math.floor(scaled) == round(scaled)
 
 
@@ -594,6 +594,22 @@ def test_tick_safe_size_handles_known_failing_trade_40():
     result = _tick_safe_size(7, 0.58)
     assert result is not None
     assert result >= 1
+
+
+def test_tick_safe_size_handles_known_failing_trade_45():
+    """Regression: trade 45 at size=11.99 limit=0.38 slipped through an
+    earlier implementation because `(12 * 0.38) * 100` = 456.00...06 looked
+    clean but `round(12 * 0.38, 2) * 100` = 455.99...94 doesn't. The check
+    must go through round()."""
+    import math
+    result = _tick_safe_size(12, 0.38)
+    assert result is not None
+    # The returned size must survive the actual py_clob_client round_down path.
+    amount = round(result * 0.38, 2)
+    scaled = amount * 100
+    assert math.floor(scaled) == round(scaled), (
+        f"size={result} amount={amount} scaled={scaled} still drifts"
+    )
 
 
 def test_submit_ioc_quantizes_to_tick_safe_size(mock_clob):
