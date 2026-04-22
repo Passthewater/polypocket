@@ -382,8 +382,11 @@ def test_submit_ioc_partial_match(mock_clob):
                              token_id="TKN-UP", condition_id="0xCOND")
 
     assert fill.status == "filled"
+    assert fill.order_id == "abc"
     assert fill.filled_size == pytest.approx(2.7, abs=0.001)  # 3.0 * 0.9
-    inst.cancel.assert_called_once()
+    # avg_price = cost_usdc / shares_held = (3.0 * 0.51) / (3.0 * 0.9) ≈ 0.5667
+    assert fill.avg_price == pytest.approx(0.5667, abs=0.001)
+    inst.cancel.assert_called_once_with(order_id="abc")
 
 
 def test_submit_ioc_no_match_returns_rejected(mock_clob):
