@@ -3,7 +3,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from polypocket.clients.polymarket import PolymarketClient, fok_limit_price
-from polypocket.executor import FillResult
 
 
 @pytest.fixture
