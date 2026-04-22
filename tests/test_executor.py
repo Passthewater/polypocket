@@ -744,3 +744,28 @@ def test_execute_live_trade_partial_fill_persists_actual_size():
     assert row["size"] == pytest.approx(3.5)
     assert row["entry_price"] == pytest.approx(0.52)
     os.unlink(db_path)
+
+
+def test_execute_live_trade_logs_dust_warning(caplog):
+    """Dust fill below MIN_POSITION_USDC * 0.25 emits a WARN dust-fill log."""
+    db_path = make_db()
+    signal = _sample_signal()
+    client = MagicMock()
+    client.get_usdc_balance.return_value = 100.0
+    # MIN_POSITION_USDC default = 5.0; dust floor = $1.25.
+    # filled_size=2.0 @ $0.60 = $1.20 notional -> dust.
+    client.submit_ioc.return_value = FillResult(
+        status="filled", order_id="abc",
+        filled_size=2.0, avg_price=0.60, error=None,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="polypocket.executor"):
+        result = execute_live_trade(
+            db_path=db_path, signal=signal, entry_price=0.61,
+            size=7.0, window_slug="w3", token_id="T", condition_id="C",
+            client=client,
+        )
+
+    assert result.success
+    assert any("dust-fill" in r.getMessage() for r in caplog.records)
+    os.unlink(db_path)

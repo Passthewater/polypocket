@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from polypocket.config import fee_shares
+from polypocket.config import fee_shares, MIN_POSITION_USDC
 from polypocket.ledger import (
     credit_paper_balance,
     deduct_paper_balance,
@@ -247,6 +247,13 @@ def execute_live_trade(
             size=fill.filled_size,
             entry_price=fill.avg_price,
         )
+        notional = fill.filled_size * (fill.avg_price or 0.0)
+        if notional < MIN_POSITION_USDC * 0.25:
+            log.warning(
+                "dust-fill %s: filled=%.4f @ $%.4f = $%.4f < floor=$%.4f",
+                window_slug, fill.filled_size, fill.avg_price or 0.0,
+                notional, MIN_POSITION_USDC * 0.25,
+            )
         log.info(
             "Live fill: %s %s requested=%.2f filled=%.4f vwap=$%.4f token=%s order=%s",
             window_slug, signal.side, size, fill.filled_size,
