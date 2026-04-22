@@ -9,6 +9,7 @@ from py_clob_client.clob_types import (
     BalanceAllowanceParams,
     MarketOrderArgs,
     OrderType,
+    TradeParams,
 )
 
 from polypocket.config import FOK_SLIPPAGE_TICKS
@@ -155,19 +156,34 @@ class PolymarketClient:
     def get_settlement_info(self, order_id: str) -> SettlementInfo:
         """Look up the CLOB record of a filled order and return real fill accounting.
 
-        shares_held = size_matched × (1 - fee_rate_bps/10000).
-        cost_usdc   = size_matched × price.
-        Polymarket charges the taker fee in outcome shares on BUY orders, so the
-        USDC debited equals size×price and the shares actually deposited are
-        post-fee. `size_matched` from the CLOB is the pre-fee matched size.
+        Reads per-fill data from the /trades endpoint rather than /order, because
+        Polymarket's pair-matching means a BUY Up can fill against a BUY Down
+        maker — the taker's true per-share price is (1 - maker_price), which
+        does NOT appear as a field on the /order response. /order.price on a
+        filled market BUY reflects the order's limit rounding, not the fill
+        rate, so `size_matched × order.price` overstates cost when matched
+        via the pair-merge path (observed on live trade: order.price=0.48 but
+        the real taker fill was 0.41).
+
+        shares_held = sum(trade.size × (1 - trade.fee_rate_bps/10000))
+        cost_usdc   = sum(trade.size × trade.price)
         """
         if self._dry_run or order_id == "DRY-RUN":
             return SettlementInfo(shares_held=0.0, cost_usdc=0.0)
 
-        resp = self._client.get_order(order_id)
-        size_matched = float(resp.get("size_matched", 0.0) or 0.0)
-        price = float(resp.get("price", 0.0) or 0.0)
-        fee_rate_bps = float(resp.get("fee_rate_bps", 0) or 0)
-        shares_held = size_matched * (1.0 - fee_rate_bps / 10_000.0)
-        cost_usdc = size_matched * price
+        order = self._client.get_order(order_id)
+        trade_ids = order.get("associate_trades") or []
+
+        shares_held = 0.0
+        cost_usdc = 0.0
+        for tid in trade_ids:
+            fills = self._client.get_trades(TradeParams(id=tid))
+            for fill in fills:
+                if fill.get("taker_order_id") != order_id:
+                    continue
+                size = float(fill.get("size", 0.0) or 0.0)
+                price = float(fill.get("price", 0.0) or 0.0)
+                fee_bps = float(fill.get("fee_rate_bps", 0) or 0)
+                shares_held += size * (1.0 - fee_bps / 10_000.0)
+                cost_usdc += size * price
         return SettlementInfo(shares_held=shares_held, cost_usdc=cost_usdc)

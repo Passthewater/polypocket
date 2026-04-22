@@ -193,13 +193,20 @@ def test_fok_limit_price_capped_at_99c():
     assert fok_limit_price(1.00) == 0.99
 
 
-def test_get_settlement_info_parses_get_order_response(mock_clob):
-    """shares_held applies the taker fee to matched size; cost is matched × price."""
+def test_get_settlement_info_sums_trades(mock_clob):
+    """shares_held applies fee per fill; cost sums fill size × fill price."""
     client, inst = _make_client(mock_clob)
     inst.get_order.return_value = {
-        "status": "MATCHED", "size_matched": "10.0",
-        "price": "0.55", "fee_rate_bps": "1000",
+        "status": "MATCHED",
+        "associate_trades": ["t1"],
     }
+    inst.get_trades.return_value = [{
+        "id": "t1",
+        "taker_order_id": "abc-order",
+        "size": "10.0",
+        "price": "0.55",
+        "fee_rate_bps": "1000",
+    }]
 
     info = client.get_settlement_info("abc-order")
 
@@ -208,14 +215,88 @@ def test_get_settlement_info_parses_get_order_response(mock_clob):
     assert info.cost_usdc == pytest.approx(10.0 * 0.55)
 
 
-def test_get_settlement_info_zero_fee(mock_clob):
+def test_get_settlement_info_uses_taker_fill_price_not_order_limit(mock_clob):
+    """Regression for live trade #17: /order.price was 0.48 (limit-ish) but
+    the taker's real fill was $0.41/share via pair-match. Must use /trades."""
     client, inst = _make_client(mock_clob)
     inst.get_order.return_value = {
-        "size_matched": "5.0", "price": "0.42", "fee_rate_bps": "0",
+        "status": "MATCHED",
+        "size_matched": "24.390242",
+        "price": "0.48",  # NOT the real fill rate — must be ignored
+        "associate_trades": ["4aa180d7"],
     }
-    info = client.get_settlement_info("ord-2")
-    assert info.shares_held == pytest.approx(5.0)
-    assert info.cost_usdc == pytest.approx(2.10)
+    inst.get_trades.return_value = [{
+        "id": "4aa180d7",
+        "taker_order_id": "0xOID",
+        "size": "24.390242",
+        "price": "0.41",
+        "fee_rate_bps": "1000",
+    }]
+
+    info = client.get_settlement_info("0xOID")
+
+    assert info.cost_usdc == pytest.approx(24.390242 * 0.41)
+    assert info.shares_held == pytest.approx(24.390242 * 0.9)
+
+
+def test_get_settlement_info_multiple_trades(mock_clob):
+    """Partial fills across multiple trades sum to total cost and shares."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {
+        "associate_trades": ["t1", "t2"],
+    }
+
+    def _trades_side_effect(params):
+        if params.id == "t1":
+            return [{
+                "id": "t1", "taker_order_id": "0xOID",
+                "size": "5.0", "price": "0.40", "fee_rate_bps": "1000",
+            }]
+        if params.id == "t2":
+            return [{
+                "id": "t2", "taker_order_id": "0xOID",
+                "size": "3.0", "price": "0.42", "fee_rate_bps": "1000",
+            }]
+        return []
+    inst.get_trades.side_effect = _trades_side_effect
+
+    info = client.get_settlement_info("0xOID")
+
+    assert info.cost_usdc == pytest.approx(5.0 * 0.40 + 3.0 * 0.42)
+    assert info.shares_held == pytest.approx((5.0 + 3.0) * 0.9)
+
+
+def test_get_settlement_info_ignores_fills_for_other_orders(mock_clob):
+    """A /trades response may include fills whose taker_order_id is not ours."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {"associate_trades": ["t1"]}
+    inst.get_trades.return_value = [
+        {
+            "id": "t1", "taker_order_id": "0xOTHER",
+            "size": "100.0", "price": "0.99", "fee_rate_bps": "1000",
+        },
+        {
+            "id": "t1", "taker_order_id": "0xOID",
+            "size": "2.0", "price": "0.50", "fee_rate_bps": "0",
+        },
+    ]
+
+    info = client.get_settlement_info("0xOID")
+
+    assert info.cost_usdc == pytest.approx(1.0)
+    assert info.shares_held == pytest.approx(2.0)
+
+
+def test_get_settlement_info_no_matches_returns_zeros(mock_clob):
+    """Unmatched/canceled orders have no associate_trades."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {"status": "CANCELED", "associate_trades": []}
+
+    info = client.get_settlement_info("0xOID")
+
+    assert info.shares_held == 0.0
+    assert info.cost_usdc == 0.0
+    inst.get_trades.assert_not_called()
 
 
 def test_get_settlement_info_dry_run_returns_zeros(mock_clob):
