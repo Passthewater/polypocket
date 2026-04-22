@@ -2,7 +2,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from polypocket.clients.polymarket import PolymarketClient, fok_limit_price, ioc_limit_price
+from polypocket.clients.polymarket import (
+    PolymarketClient, _tick_safe_size, fok_limit_price, ioc_limit_price,
+)
 
 
 @pytest.fixture
@@ -564,8 +566,61 @@ def test_submit_ioc_uses_explicit_limit_price(mock_clob):
 
     args = inst.create_market_order.call_args.args[0]
     assert args.price == pytest.approx(0.42)
-    # amount still uses price (the display/budget price), not limit_price
-    assert args.amount == pytest.approx(round(7.0 * 0.51, 2))
+    # amount is now anchored to limit_price (not price) since the server
+    # reconstructs taker = amount/limit, and that ratio must land on tick grid.
+    # size_int = 7 is tick-safe for limit=0.42 (7*0.42=2.94, scaled 294.0 clean).
+    assert args.amount == pytest.approx(round(7 * 0.42, 2))
+
+
+def test_tick_safe_size_picks_target_when_clean():
+    """target size already tick-safe → returns target unchanged."""
+    # 9 * 0.58 = 5.22 → scaled 522.0 (clean)
+    assert _tick_safe_size(9, 0.58) == 9
+
+
+def test_tick_safe_size_shifts_when_target_drifts():
+    """target=7 at limit=0.58: 7*0.58=4.06 scaled to 405.9999 (drift).
+    Search finds 8 (also drifts) then 9 (clean)."""
+    result = _tick_safe_size(7, 0.58)
+    # Must return a value where size * 0.58 passes the floor-vs-round check
+    import math
+    scaled = result * 0.58 * 100
+    assert math.floor(scaled) == round(scaled)
+
+
+def test_tick_safe_size_handles_known_failing_trade_40():
+    """Regression: trade 40 (2026-04-22) failed at size=7.49 limit=0.58."""
+    # 7.49 rounds to 7; 7 drifts; search must yield a safe neighbor.
+    result = _tick_safe_size(7, 0.58)
+    assert result is not None
+    assert result >= 1
+
+
+def test_submit_ioc_quantizes_to_tick_safe_size(mock_clob):
+    """submit_ioc must submit an amount whose size*limit survives py_clob_client's round_down."""
+    import math
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
+    inst.get_order.return_value = {"size_matched": "9.0", "associate_trades": []}
+
+    # Real failing case: size=7.49, limit=0.58 → raw ratio lands off-grid.
+    client.submit_ioc(side="up", price=0.51, size=7.49,
+                      token_id="TKN-UP", condition_id="0xCOND",
+                      limit_price=0.58)
+
+    args = inst.create_market_order.call_args.args[0]
+    scaled = args.amount * 100
+    # Core invariant: floor-scaled amount equals round-scaled (no drift).
+    assert math.floor(scaled) == round(scaled), (
+        f"submit_ioc picked drift-prone amount {args.amount} at limit {args.price}"
+    )
+    # And amount is exactly size_int * limit for some integer size_int >= 1.
+    ratio = args.amount / args.price
+    assert abs(ratio - round(ratio)) < 1e-6
+    assert round(ratio) >= 1
 
 
 def test_submit_ioc_full_match_with_rounding_tolerance(mock_clob):

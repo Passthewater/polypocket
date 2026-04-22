@@ -1,6 +1,7 @@
 """Polymarket CLOB client — L2 proxy-wallet signing."""
 
 import logging
+import math
 import time
 
 from py_clob_client.client import ClobClient
@@ -33,6 +34,26 @@ CANCEL_RETRY_BACKOFF_S = 0.25
 def fok_limit_price(price: float) -> float:
     """FOK limit price: best ask + FOK_SLIPPAGE_TICKS, capped at $0.99."""
     return round(min(0.99, price + FOK_SLIPPAGE_TICKS * 0.01), 2)
+
+
+def _tick_safe_size(target_size: int, limit_price: float, search: int = 6) -> int | None:
+    """Pick an integer size where amount = size*limit survives py_clob_client's
+    float-based round_down. Some (size, limit) combos produce amount values like
+    4.06 whose float rep is 4.05999...; py_clob_client's round_down then floors
+    into the previous cent, corrupting the reconstructed taker and tripping
+    the server's 0.01 tick check. Searches ±search around target and returns
+    the first safe size, or None.
+    """
+    candidates = [target_size]
+    for d in range(1, search + 1):
+        candidates.extend([target_size + d, target_size - d])
+    for s in candidates:
+        if s < 1:
+            continue
+        scaled = (s * limit_price) * 100
+        if math.floor(scaled) == round(scaled):
+            return s
+    return None
 
 
 def ioc_limit_price(
@@ -184,9 +205,25 @@ class PolymarketClient:
             )
 
         fee_rate_bps = self._fee_rate_bps(condition_id)
+        # Tick-safe amount: quantize size to integer and pick a neighbor whose
+        # amount = size * limit_price survives py_clob_client's float-based
+        # round_down. Otherwise the server tick-checks the reconstructed
+        # taker and rejects with `breaks minimum tick size rule: 0.01`.
+        target_size_int = max(1, int(round(size)))
+        size_int = _tick_safe_size(target_size_int, limit_price)
+        if size_int is None:
+            log.error(
+                "submit_ioc: no tick-safe size near %d for limit=%.4f",
+                target_size_int, limit_price,
+            )
+            return FillResult(
+                status="rejected", order_id=None, filled_size=0.0,
+                avg_price=None, error="tick-size-unfixable",
+            )
+        amount = round(size_int * limit_price, 2)
         args = MarketOrderArgs(
             token_id=token_id,
-            amount=round(size * price, 2),
+            amount=amount,
             price=limit_price,
             fee_rate_bps=fee_rate_bps,
         )
@@ -224,7 +261,9 @@ class PolymarketClient:
             log.warning("submit_ioc: get_order check failed for %s: %s", order_id, exc)
             size_matched = 0.0
 
-        fully_matched = size_matched >= size - 0.01
+        # Compare against the integer size we actually submitted, not the
+        # caller's pre-quantization float size.
+        fully_matched = size_matched >= size_int - 0.01
         if not fully_matched:
             self.cancel_order(order_id)
 
