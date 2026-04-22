@@ -383,6 +383,10 @@ class Bot:
         vol_scale = min(max((sigma - VOL_FLOOR) / VOL_RANGE, 0.0), 1.0)
         size_usdc = MIN_POSITION_USDC + (edge_scale * vol_scale) * (MAX_POSITION_USDC - MIN_POSITION_USDC)
 
+        # Capture diagnostic intent BEFORE any clamp so IOC_DIAG reports the
+        # edge-vol-sized target even when balance or depth clamps fire.
+        intended_size_pre_clamp = size_usdc / entry_price
+
         # Live-only preflight: clamp size_usdc to available balance (minus a
         # 2% buffer for fees). Only skip when we can't even afford the floor.
         if TRADING_MODE != "paper" and self.live_order_client is not None:
@@ -405,8 +409,7 @@ class Bot:
 
         size = size_usdc / entry_price
 
-        # Initialize diagnostic variables; overwritten in live path below.
-        intended_size_pre_clamp = size
+        # Diagnostic fillable; overwritten in live path below.
         fillable = 0.0
 
         # Staleness gate: refuse to trade on a book that hasn't ticked recently.
@@ -431,7 +434,6 @@ class Bot:
             # only if even a MIN_FILL_RATIO slice of visible depth cannot
             # clear MIN_POSITION_USDC (guarantees any non-skipped trade's
             # worst-acceptable partial is above the dust floor).
-            intended_size_pre_clamp = size  # may differ from outer init if balance clamp fired
             book = window.up_book if signal.side == "up" else window.down_book
             limit = fok_limit_price(entry_price)
             fillable = sum(
