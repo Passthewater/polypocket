@@ -462,3 +462,30 @@ def test_submit_ioc_dry_run(mock_clob):
                              token_id="TKN", condition_id="COND")
     assert fill.status == "filled"
     assert fill.filled_size == 7.0
+
+
+def test_submit_ioc_full_match_with_rounding_tolerance(mock_clob):
+    """size_matched=6.995 vs size=7.0: within 0.01 cents so treated as fully matched.
+
+    Server-side fee rounding can produce a floor-rounded size_matched that's
+    off by < 0.01 shares; must skip cancel (server rejects cancel of filled).
+    """
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
+    # size_matched is 0.005 short of 7.0 — within the 0.01 tolerance
+    inst.get_order.return_value = {
+        "size_matched": "6.995",
+        "associate_trades": ["t1"],
+    }
+    inst.get_trades.return_value = [
+        {"taker_order_id": "abc", "size": "6.995", "price": "0.51", "fee_rate_bps": 1000},
+    ]
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND")
+
+    assert fill.status == "filled"
+    inst.cancel.assert_not_called()

@@ -200,7 +200,7 @@ class PolymarketClient:
             log.warning("submit_ioc: get_order check failed for %s: %s", order_id, exc)
             size_matched = 0.0
 
-        fully_matched = size_matched >= size - 1e-9
+        fully_matched = size_matched >= size - 0.01
         if not fully_matched:
             self.cancel_order(order_id)
 
