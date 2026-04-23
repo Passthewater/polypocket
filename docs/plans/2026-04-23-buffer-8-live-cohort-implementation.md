@@ -62,7 +62,12 @@ Expected: FAIL with `ImportError: cannot import name 'cohort_stop_requested'`.
 In `polypocket/bot.py`, add a module-level helper near the top of the file (just after imports):
 
 ```python
-COHORT_STOP_FILE = Path(".cohort_stop")
+# Anchor the kill-file to the project root (parent of the polypocket/ package
+# dir), not cwd. If the bot is launched from systemd or a different cwd than
+# the repo root, a cwd-relative path would silently do nothing. Env var
+# override allows operator to relocate if needed.
+_DEFAULT_COHORT_STOP = Path(__file__).resolve().parent.parent / ".cohort_stop"
+COHORT_STOP_FILE = Path(os.environ.get("COHORT_STOP_FILE", str(_DEFAULT_COHORT_STOP)))
 
 
 def cohort_stop_requested(path: Path = COHORT_STOP_FILE) -> bool:
@@ -70,7 +75,9 @@ def cohort_stop_requested(path: Path = COHORT_STOP_FILE) -> bool:
     return path.exists()
 ```
 
-Add `from pathlib import Path` to imports if not already present.
+Add `from pathlib import Path` and `import os` to imports if not already present.
+
+The watchdog uses the same resolution logic — see Task 2.
 
 At the top of `_on_book_update` (line 108, immediately after `del side`), add:
 
@@ -160,27 +167,35 @@ def test_wall_clock_trips():
     assert "wall" in v["reason"].lower() or "time" in v["reason"].lower()
 
 
-def test_reject_breaker_trips_at_50pct_of_first_10():
+def test_reject_breaker_trips_at_exactly_10_attempts():
     # 6 rejects + 4 fills = 10 attempts, 60% reject -> trip
     v = evaluate_rails(BASE, n_fills=4, n_rejects=6, cum_pnl=-0.4, elapsed_days=0.2)
     assert v["trip"] is True
     assert "reject" in v["reason"].lower()
 
 
-def test_reject_breaker_dormant_after_first_10():
-    # After 10+ attempts, the breaker no longer fires even if reject-rate is high.
-    # 15 fills + 10 rejects = 25 attempts, 40%, still under breaker_pct but
-    # breaker only watches the FIRST 10. Should not trip.
-    v = evaluate_rails(BASE, n_fills=15, n_rejects=10, cum_pnl=-5.0, elapsed_days=2.0)
-    # Won't trip on reject rate (breaker is "first 10 only"). But fills cap is 25,
-    # and n_fills=15 < 25, so no trip.
+def test_reject_breaker_trips_while_armed_under_10():
+    # Breaker is "armed during first 10 attempts" -- fires the moment
+    # reject-rate crosses threshold, NOT only when attempts==10 exactly.
+    # Polling at 60s can skip past attempts=10 (rejects fire fast); if the
+    # breaker waits for an exact equality, it misses. So: 7 attempts, 4
+    # rejects = 57% -> must trip.
+    v = evaluate_rails(BASE, n_fills=3, n_rejects=4, cum_pnl=-0.6, elapsed_days=0.1)
+    assert v["trip"] is True
+    assert "reject" in v["reason"].lower()
+
+
+def test_reject_breaker_dormant_past_armed_window():
+    # attempts=11 past the 10-attempt armed window -> breaker dormant even
+    # at 54% rejects. Fill cap (25) is still not hit. No trip.
+    v = evaluate_rails(BASE, n_fills=5, n_rejects=6, cum_pnl=-2.0, elapsed_days=1.0)
     assert v["trip"] is False
 
 
-def test_reject_breaker_not_yet_armed():
-    # Fewer than `reject_breaker_after` attempts -> breaker doesn't fire.
-    # 3 fills + 4 rejects = 7 attempts, 57% rejects, but armed threshold is 10.
-    v = evaluate_rails(BASE, n_fills=3, n_rejects=4, cum_pnl=-1.0, elapsed_days=0.1)
+def test_reject_breaker_requires_min_attempts():
+    # 1 attempt, 1 reject = 100% but single-observation noise. Don't trip
+    # on n=1. Minimum armed attempts is 2.
+    v = evaluate_rails(BASE, n_fills=0, n_rejects=1, cum_pnl=0.0, elapsed_days=0.05)
     assert v["trip"] is False
 ```
 
@@ -213,13 +228,16 @@ persisted that way, edit `_count_rejects` after inspecting the schema.
 """
 import argparse
 import datetime as dt
+import os
 import pathlib
 import sqlite3
 import sys
 import time
 from dataclasses import dataclass
 
-KILL_FILE = pathlib.Path(".cohort_stop")
+# Same resolution as bot.py (parent of the polypocket/ package == repo root).
+_DEFAULT_KILL = pathlib.Path(__file__).resolve().parent.parent / ".cohort_stop"
+KILL_FILE = pathlib.Path(os.environ.get("COHORT_STOP_FILE", str(_DEFAULT_KILL)))
 
 
 @dataclass(frozen=True)
@@ -255,24 +273,29 @@ def evaluate_rails(
     if elapsed_days >= rails.max_wall_clock_days:
         return {"trip": True, "reason": f"wall-clock cap hit ({elapsed_days:.2f} >= {rails.max_wall_clock_days} days)", **metrics}
 
+    # Reject-rate breaker: armed while attempts <= reject_breaker_after,
+    # fires the moment rate crosses threshold. Critical that this is a range
+    # check, not equality: the watchdog polls at 60s intervals and attempts
+    # can jump (e.g. 8 -> 11) between polls. An equality check would silently
+    # skip a tripping window. Minimum 2 attempts to avoid n=1 noise.
     attempts = n_fills + n_rejects
-    if attempts >= rails.reject_breaker_after and n_fills + n_rejects <= rails.reject_breaker_after + 0:
-        # Breaker is "first 10 only": only fires at the moment the 10th attempt lands
-        # if reject-rate at that moment is >= breaker_pct.
-        pass
-    # Simpler: fire when attempts is EXACTLY in the [after, after] snapshot window.
-    # But the test wants it to fire AT attempts == 10 with rejects >= 5.
-    if attempts >= rails.reject_breaker_after:
-        # Only enforce the breaker during the first `reject_breaker_after` attempts.
-        # After that, the fill cap / loss cap take over.
-        if attempts == rails.reject_breaker_after:
-            if n_rejects / attempts >= rails.reject_breaker_pct:
-                return {"trip": True, "reason": f"reject-rate breaker ({n_rejects}/{attempts} in first 10)", **metrics}
+    if 2 <= attempts <= rails.reject_breaker_after:
+        if n_rejects / attempts >= rails.reject_breaker_pct:
+            return {
+                "trip": True,
+                "reason": f"reject-rate breaker ({n_rejects}/{attempts} in first {rails.reject_breaker_after})",
+                **metrics,
+            }
 
     return {"trip": False, "reason": None, **metrics}
 
 
 def _count_fills_and_pnl(db: str, since_iso: str) -> tuple[int, float]:
+    # Note: SUM(pnl) silently treats NULL rows (open trades) as 0. For 5-minute
+    # BTC windows this is usually fine -- max unrealized lag is ~5 min and the
+    # watchdog polls at 60s. If the project ever adds longer-lived positions,
+    # revisit this: a losing open trade is invisible to the loss cap until it
+    # settles. The fill cap and wall-clock cap remain unaffected.
     c = sqlite3.connect(db)
     r = c.execute(
         """SELECT COUNT(*), COALESCE(SUM(pnl), 0.0)
@@ -324,11 +347,19 @@ def poll_loop(db: str, since_iso: str, rails: Rails, poll_seconds: int) -> dict:
         time.sleep(poll_seconds)
 
 
+def _default_since() -> str | None:
+    f = pathlib.Path(".cohort_start")
+    if f.exists():
+        return f.read_text().strip()
+    return None
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--db", default="live_trades.db")
-    p.add_argument("--since", required=True,
-                   help="ISO8601 UTC cohort-start timestamp, e.g. 2026-04-23T18:00:00")
+    p.add_argument("--since", default=_default_since(),
+                   help="ISO8601 UTC cohort-start timestamp. "
+                        "Defaults to reading .cohort_start file.")
     p.add_argument("--poll-seconds", type=int, default=60)
     p.add_argument("--max-fills", type=int, default=25)
     p.add_argument("--max-loss", type=float, default=20.0)
@@ -336,6 +367,8 @@ def main():
     p.add_argument("--reject-breaker-after", type=int, default=10)
     p.add_argument("--reject-breaker-pct", type=float, default=0.5)
     args = p.parse_args()
+    if not args.since:
+        p.error("--since required (or create .cohort_start)")
 
     rails = Rails(
         max_fills=args.max_fills,
@@ -363,13 +396,16 @@ If `test_reject_breaker_dormant_after_first_10` fails because the implementation
 
 ### Step 5: Smoke-run (optional, pre-launch)
 
-With a stale `--since` timestamp to verify the DB query works:
+Use a *future* `--since` timestamp so the query returns zero rows — verifies DB access and output path without tripping any rail on historical data:
 
 ```bash
-python scripts/cohort_watchdog.py --since 2026-04-23T00:00:00 --poll-seconds 5
+FUTURE=$(python -c "import datetime; print((datetime.datetime.utcnow() + datetime.timedelta(hours=1)).isoformat(timespec='seconds'))")
+python scripts/cohort_watchdog.py --since "$FUTURE" --poll-seconds 5
 ```
 
-Expected: one line every 5s showing current fills/rejects/pnl against all historical post-2026-04-23 data. Ctrl-C to stop. **Delete `.cohort_stop` if it was written** during this smoke run.
+Expected: one "ok fills=0 rejects=0 pnl=+0.00 days=-0.04 ..." line every 5s. Ctrl-C to stop. Confirm `.cohort_stop` was **not** created (negative elapsed_days should not trip the wall-clock cap; the `>=` comparison handles it, but verify).
+
+If `.cohort_stop` was created, delete it: `rm .cohort_stop`.
 
 ### Step 6: Verify rejects are tracked the way the watchdog assumes
 
@@ -436,15 +472,24 @@ def test_compute_slip_ticks_float_artifact():
 
 
 def test_slip_distribution_basic():
+    # Pinned against `statistics.median` (mean of the two middle values for
+    # even n) and nearest-rank quartiles from a simple sorted-list indexing.
+    # The implementation in scripts/analyze_buffer_cohort.py MUST match these
+    # expected values; adjust the implementation, not the test.
     slips = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     d = slip_distribution(slips)
     assert d["n"] == 10
-    assert d["median"] == 5  # tie-break lower-median (5 or 6 both ok); doc whichever
+    assert d["median"] == 5.5   # statistics.median on even n
     assert d["mean"] == pytest.approx(5.5)
     assert d["min"] == 1
     assert d["max"] == 10
-    assert d["p25"] == 3  # or 3.25; doc whichever
-    assert d["p75"] == 8  # or 7.75
+    # Nearest-rank percentile with simple indexing:
+    #   p25 index = n // 4 - 1 = 1 (value 2);
+    #   p75 index = 3 * n // 4 = 7 (value 8).
+    # If you prefer a different percentile convention, update BOTH the
+    # implementation AND these numbers -- don't add "or X" escape hatches.
+    assert d["p25"] == 2
+    assert d["p75"] == 8
 
 
 def test_slip_distribution_empty():
@@ -642,11 +687,21 @@ def _emit_report(since_iso: str, dist: dict, verdict: str, n_rejects: int, total
     return body
 
 
+def _default_since() -> str | None:
+    f = pathlib.Path(".cohort_start")
+    if f.exists():
+        return f.read_text().strip()
+    return None
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--db", default="live_trades.db")
-    p.add_argument("--since", required=True)
+    p.add_argument("--since", default=_default_since(),
+                   help="ISO8601 UTC cohort-start timestamp. Defaults to .cohort_start.")
     args = p.parse_args()
+    if not args.since:
+        p.error("--since required (or create .cohort_start)")
 
     rows = _load_cohort(args.db, args.since)
     slips = [compute_slip_ticks(r["entry_price"], r["best_opp_bid"]) for r in rows]
@@ -701,16 +756,30 @@ EOF
 - `.cohort_stop` does **not** exist in the repo root. Delete it if it does.
 - Live bot is currently paused. Confirm via process check or log inspection.
 
-### Step 2: Pick the cohort-start timestamp
+### Step 2: Pick the cohort-start timestamp and persist it
 
-Record this value verbatim — both the watchdog and the analyzer consume it:
+Record to a gitignored file so the watchdog and analyzer can both read it and a closed shell tab doesn't quietly drift the cohort window:
 
 ```
-COHORT_START=$(python -c "import datetime; print(datetime.datetime.utcnow().isoformat(timespec='seconds'))")
-echo "$COHORT_START"
+python -c "import datetime; print(datetime.datetime.utcnow().isoformat(timespec='seconds'))" > .cohort_start
+cat .cohort_start
 ```
 
-Save to a temporary note (e.g. paste into the terminal scratch buffer or a `.cohort_start` file not tracked by git) for reuse in step 4 and Task 5.
+Append `.cohort_start` and `.cohort_stop` to `.gitignore` (check if already listed first):
+
+```
+grep -qxF '.cohort_start' .gitignore 2>/dev/null || echo '.cohort_start' >> .gitignore
+grep -qxF '.cohort_stop' .gitignore 2>/dev/null || echo '.cohort_stop' >> .gitignore
+```
+
+Commit the `.gitignore` update separately so the cohort start itself never enters git:
+
+```bash
+git add .gitignore
+git commit -m "chore: gitignore cohort control files (#14)"
+```
+
+Both `scripts/cohort_watchdog.py` and `scripts/analyze_buffer_cohort.py` default `--since` to reading `.cohort_start` if the flag is omitted (see the implementation notes at the end of Tasks 2 and 3 — if the scripts as written in those tasks don't have this default, add the ~3 lines now). Pass `--since` explicitly only when debugging a past cohort.
 
 ### Step 3: Start the bot with the experimental env var
 
@@ -777,7 +846,42 @@ Sanity checks:
 - Is reject rate coherent with fill count (not zero if the bot attempted and didn't land)?
 - Is median in line with mean, or is the distribution pathological (e.g. bimodal)? If bimodal, the point-estimate median is misleading — note it in the report manually before committing.
 
-### Step 4: Commit the artifact
+### Step 4: Run the replay-PnL sidecar (sanity check, not decisional)
+
+Per the design doc, re-run `scripts/replay_paper_live_fills.py` on the *combined* post-2026-04-23 corpus (baseline 59 + cohort 20 ≈ 79 fills) with the new buffer and the cohort-measured median slip as cushion:
+
+```
+python scripts/replay_paper_live_fills.py \
+    --buffer-ticks 8 \
+    --cushion-ticks <M from the analyzer report> \
+    --threshold 0.03 \
+    --max-price 0.70
+```
+
+Compare the replay total_pnl and avg/trade against the actual combined-corpus numbers from a direct DB query:
+
+```
+sqlite3 live_trades.db "SELECT COUNT(*), ROUND(SUM(pnl),2), ROUND(AVG(pnl),3) FROM trades WHERE status='settled' AND pnl IS NOT NULL AND timestamp >= '2026-04-23';"
+```
+
+Append a short "Replay sidecar" section to `scripts/_cohort_analysis.md` by hand (or extend the analyzer later to do this automatically):
+
+```markdown
+## Replay-PnL sidecar (sanity check, not decisional)
+
+Combined post-2026-04-23 corpus (n=<79>): actual total_pnl <X>, avg <Y>.
+Replay at buffer=8, cushion=<M>, threshold=0.03, max_price=0.70:
+  total_pnl <X'>, avg <Y'>.
+
+Divergence: <X'-X> total, <Y'-Y>/trade.
+```
+
+Interpretation (does **not** override the slip verdict):
+
+- **Within ±30%** of actual: fill model is calibrated for the new regime. Unblocks the joint sweep the original #11/#13 plan needed.
+- **Outside ±30%**: book-churn modeling remains an unresolved gap. Note in the sidecar section; follow-up work.
+
+### Step 5: Commit the artifact
 
 ```bash
 git add scripts/_cohort_analysis.md
@@ -794,7 +898,7 @@ EOF
 
 Fill the placeholders from the report.
 
-### Step 5: Branch on verdict
+### Step 6: Branch on verdict
 
 - **SHIP** → proceed to Task 6.
 - **ESCALATE** → proceed to Task 7.
