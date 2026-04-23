@@ -79,6 +79,7 @@ def evaluate_rails(
 
 
 def _count_fills_and_pnl(db: str, since_iso: str) -> tuple[int, float]:
+    since_iso = since_iso.replace("T", " ")
     # SUM(pnl) treats NULL (open trades) as 0 — fine for short-lived windows.
     c = sqlite3.connect(db)
     r = c.execute(
@@ -94,6 +95,7 @@ def _count_fills_and_pnl(db: str, since_iso: str) -> tuple[int, float]:
 
 
 def _count_rejects(db: str, since_iso: str) -> int:
+    since_iso = since_iso.replace("T", " ")
     c = sqlite3.connect(db)
     r = c.execute(
         """SELECT COUNT(*) FROM trades

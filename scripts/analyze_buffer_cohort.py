@@ -61,6 +61,7 @@ def classify_verdict(median_slip) -> str:
 
 
 def _load_cohort(db: str, since_iso: str) -> list[dict]:
+    since_iso = since_iso.replace("T", " ")
     c = sqlite3.connect(db)
     c.row_factory = sqlite3.Row
     rows = c.execute(
@@ -98,6 +99,7 @@ def _load_cohort(db: str, since_iso: str) -> list[dict]:
 
 
 def _count_rejects(db: str, since_iso: str) -> int:
+    since_iso = since_iso.replace("T", " ")
     c = sqlite3.connect(db)
     r = c.execute(
         "SELECT COUNT(*) FROM trades WHERE status='rejected' AND timestamp >= ?",
