@@ -10,3 +10,5 @@ live_trades.db
 live_trades*.bak.db
 observations.csv
 reports/
+.cohort_start
+.cohort_stop
