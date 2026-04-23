@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import os
 import time
+from pathlib import Path
 
 from polypocket.config import (
     CALIBRATION_SHRINKAGE_DOWN,
@@ -47,6 +49,16 @@ from polypocket.risk import RiskManager
 from polypocket.signal import SignalEngine
 
 log = logging.getLogger(__name__)
+
+# Anchor kill-file to repo root (parent of polypocket/ package dir) so the
+# bot finds it regardless of cwd when launched from systemd or a script.
+_DEFAULT_COHORT_STOP = Path(__file__).resolve().parent.parent / ".cohort_stop"
+COHORT_STOP_FILE = Path(os.environ.get("COHORT_STOP_FILE", str(_DEFAULT_COHORT_STOP)))
+
+
+def cohort_stop_requested(path: Path = COHORT_STOP_FILE) -> bool:
+    """True if the cohort watchdog has written the kill-file."""
+    return path.exists()
 
 
 class Bot:
@@ -107,6 +119,8 @@ class Bot:
 
     async def _on_book_update(self, window: Window, side: str) -> None:
         del side
+        if cohort_stop_requested():
+            return
         if self.binance.latest_price is None:
             return
 
@@ -161,7 +175,12 @@ class Bot:
             recovered_trade = find_trade_by_window_slug(self.db_path, window.slug)
             recoverable_statuses = {"open"}
             if TRADING_MODE == "live":
+                # 'reserved' covers crash-between-post-and-update. 'rejected'
+                # covers the stranded-fill sweep — the reconciler checks if
+                # anything actually matched on-chain for rejected rows that
+                # still carry an external_order_id, and promotes them.
                 recoverable_statuses.add("reserved")
+                recoverable_statuses.add("rejected")
             if recovered_trade is not None and recovered_trade["status"] in recoverable_statuses:
                 final_status = recovered_trade["status"]
                 if TRADING_MODE == "live" and recovered_trade.get("external_order_id"):
@@ -330,8 +349,11 @@ class Bot:
         if not self._open_snapshot_emitted and self.stats["up_ask"] is not None and self.stats["down_ask"] is not None:
             self._open_snapshot_emitted = True
             book_depth = None
-            if window.up_book or window.down_book:
-                book_depth = {"up": window.up_book, "down": window.down_book}
+            if window.up_book or window.down_book or window.up_bids or window.down_bids:
+                book_depth = {
+                    "up": window.up_book, "down": window.down_book,
+                    "up_bids": window.up_bids, "down_bids": window.down_bids,
+                }
             log_snapshot(
                 self.db_path,
                 window_slug=window.slug,
@@ -362,6 +384,8 @@ class Bot:
             sigma_5min=sigma,
             up_ask=window.up_ask,
             down_ask=window.down_ask,
+            up_bids=window.up_bids,
+            down_bids=window.down_bids,
         )
         if signal is None:
             if not self._window_traded and self._window_skip_reason is None:
@@ -491,8 +515,11 @@ class Bot:
         )
 
         book_depth = None
-        if window.up_book or window.down_book:
-            book_depth = {"up": window.up_book, "down": window.down_book}
+        if window.up_book or window.down_book or window.up_bids or window.down_bids:
+            book_depth = {
+                "up": window.up_book, "down": window.down_book,
+                "up_bids": window.up_bids, "down_bids": window.down_bids,
+            }
         log_snapshot(
             self.db_path,
             window_slug=window.slug,
@@ -528,13 +555,34 @@ class Bot:
 
             # Diagnostic log: compare snapshot vs. realized fill for root-cause analysis.
             recorded = find_trade_by_window_slug(self.db_path, window.slug)
-            actual_size = recorded.get("size") if recorded else None
-            actual_price = recorded.get("entry_price") if recorded else None
+            recorded_status = recorded.get("status") if recorded else None
+            recorded_error = recorded.get("error") if recorded else None
+            # For rejected/reserved rows, size & entry_price still hold the
+            # *intended* values (never overwritten by a failed fill). Reporting
+            # them as `filled` and `vwap` would lie — only read them when the
+            # trade actually transitioned to an on-chain fill (open/settled).
+            is_fill = recorded_status in {"open", "settled"}
+            actual_size = recorded.get("size") if (recorded and is_fill) else None
+            actual_price = recorded.get("entry_price") if (recorded and is_fill) else None
             shortfall = (size - actual_size) if actual_size is not None else None
+            # Capture the opposite-book best bid that drove limit_price, so
+            # post-mortem can compare the decision-time clearing vs. the
+            # realized fill. Matches the opp_bids pick in ioc_limit_price.
+            opp_bids_for_diag = window.down_bids if signal.side == "up" else window.up_bids
+            best_opp_bid = max(
+                (float(b["price"]) for b in (opp_bids_for_diag or [])),
+                default=None,
+            )
+            implied_clearing = (1.0 - best_opp_bid) if best_opp_bid is not None else None
             log.info(
                 "IOC_DIAG intended=%.4f target=%.4f fillable=%.4f limit=%.4f "
-                "filled=%s vwap=%s shortfall=%s",
+                "opp_best_bid=%s implied_clearing=%s "
+                "status=%s error=%s filled=%s vwap=%s shortfall=%s",
                 intended_size_pre_clamp, size, fillable, limit_price,
+                f"{best_opp_bid:.4f}" if best_opp_bid is not None else "n/a",
+                f"{implied_clearing:.4f}" if implied_clearing is not None else "n/a",
+                recorded_status or "n/a",
+                recorded_error or "n/a",
                 f"{actual_size:.4f}" if actual_size is not None else "n/a",
                 f"{actual_price:.4f}" if actual_price is not None else "n/a",
                 f"{shortfall:.4f}" if shortfall is not None else "n/a",
