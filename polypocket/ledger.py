@@ -151,6 +151,25 @@ def init_db(db_path: str) -> None:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_order_events_window ON order_events(window_slug)"
             )
+            # G5: mid-window book trajectory samples.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS window_book_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    window_slug TEXT NOT NULL,
+                    sampled_at REAL NOT NULL,
+                    up_bids_json TEXT, up_asks_json TEXT,
+                    down_bids_json TEXT, down_asks_json TEXT,
+                    btc_price REAL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_book_samples_window ON window_book_samples(window_slug)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_book_samples_ts ON window_book_samples(sampled_at)"
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -500,5 +519,48 @@ def get_order_events(db_path: str, trade_id: int) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM order_events WHERE trade_id = ? ORDER BY id",
             (trade_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def log_book_sample(
+    db_path: str,
+    window_slug: str,
+    sampled_at: float,
+    up_bids,
+    up_asks,
+    down_bids,
+    down_asks,
+    btc_price: float | None,
+) -> None:
+    """Write one mid-window book snapshot row."""
+    import json
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO window_book_samples (
+                window_slug, sampled_at,
+                up_bids_json, up_asks_json, down_bids_json, down_asks_json,
+                btc_price
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                window_slug, sampled_at,
+                json.dumps(up_bids), json.dumps(up_asks),
+                json.dumps(down_bids), json.dumps(down_asks),
+                btc_price,
+            ),
+        )
+        conn.commit()
+
+
+def get_book_samples(db_path: str, window_slug: str) -> list[dict]:
+    """Retrieve all book samples for a window, oldest first."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM window_book_samples WHERE window_slug = ? ORDER BY id",
+            (window_slug,),
         ).fetchall()
         return [dict(row) for row in rows]

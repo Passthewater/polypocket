@@ -43,13 +43,23 @@ from polypocket.feeds.polymarket import (
     fetch_resolution,
     subscribe_and_stream,
 )
-from polypocket.ledger import find_trade_by_window_slug, find_unsettled_trades, init_db, log_snapshot
+from polypocket.ledger import (
+    find_trade_by_window_slug,
+    find_unsettled_trades,
+    init_db,
+    log_book_sample,
+    log_snapshot,
+)
 from polypocket.observer import calibrate_p_up, compute_model_p_up, compute_realized_vol
 from polypocket.quotes import QuoteSnapshot, validate_quote
 from polypocket.risk import RiskManager
 from polypocket.signal import SignalEngine
 
 log = logging.getLogger(__name__)
+
+# G5: mid-window book-sample cadence. Module-level constant (not env-backed)
+# — tests/conftest.py:_key tuple doesn't need to change.
+BOOK_SAMPLE_INTERVAL_S = 30.0
 
 # Anchor kill-file to repo root (parent of polypocket/ package dir) so the
 # bot finds it regardless of cwd when launched from systemd or a script.
@@ -86,6 +96,9 @@ class Bot:
         self._best_edge_abs: float = 0.0
         self._best_edge_snapshot: dict | None = None
         self._window_skip_reason: str | None = None
+        # G5: last book-sample wall-clock time. Reset on each window transition
+        # so the cadence restarts from the new window's start, not absolute time.
+        self._last_book_sample_ts: float = 0.0
         # Trades from past windows awaiting resolution
         self._pending_settlements: list[dict] = []
 
@@ -200,6 +213,10 @@ class Bot:
             self._open_snapshot_emitted = False
             self._best_edge_abs = 0.0
             self._best_edge_snapshot = None
+            # G5: defer first mid-window sample to +30s so it doesn't duplicate
+            # the open snapshot at t=0. 9 samples per 5-min window (t=30, 60,
+            # ..., 270), not 10 with the first redundant.
+            self._last_book_sample_ts = now
             self._window_skip_reason = None
             self.stats["position"] = None
             self.stats["execution_status"] = None
@@ -307,6 +324,20 @@ class Bot:
         # live window's stats or trigger signal evaluation.
         if not (window.start_time <= now < window.end_time):
             return
+
+        # G5: mid-window book sample every BOOK_SAMPLE_INTERVAL_S seconds.
+        if now - self._last_book_sample_ts >= BOOK_SAMPLE_INTERVAL_S:
+            self._last_book_sample_ts = now
+            log_book_sample(
+                self.db_path,
+                window_slug=window.slug,
+                sampled_at=now,
+                up_bids=window.up_bids,
+                up_asks=window.up_book,
+                down_bids=window.down_bids,
+                down_asks=window.down_book,
+                btc_price=self.binance.latest_price,
+            )
 
         t_remaining = window.end_time - now
         t_elapsed = now - window.start_time

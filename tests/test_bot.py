@@ -1753,3 +1753,102 @@ async def test_phase1_settle_does_not_write_close(tmp_path: Path, monkeypatch):
 
     rows = [r for r in get_snapshots_for_window(str(db_path), "win-a") if r["snapshot_type"] == "close"]
     assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 (G5): mid-window book samples
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_phase5_first_sample_deferred_past_window_open(tmp_path: Path):
+    """Opening a new window must NOT emit a book sample — the `open` snapshot
+    already covers t=0. First sample lands only once +30s has elapsed."""
+    from polypocket.bot import Bot
+    from polypocket.ledger import get_book_samples
+
+    db_path = tmp_path / "p5.db"
+    init_db(str(db_path))
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84250.0
+    bot.signal_engine.evaluate = lambda **kwargs: None
+
+    now = time.time()
+    window = _make_window("A", "win-a", end_time=now + 300, ptb=84198.0)
+
+    await bot._on_book_update(window, "up")
+    assert get_book_samples(str(db_path), "win-a") == []
+
+
+@pytest.mark.asyncio
+async def test_phase5_sample_emitted_after_30s(tmp_path: Path, monkeypatch):
+    """Drive two updates ≥30s apart → two samples. Two updates <30s apart → one."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+    from polypocket.ledger import get_book_samples
+
+    db_path = tmp_path / "p5.db"
+    init_db(str(db_path))
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84250.0
+    bot.signal_engine.evaluate = lambda **kwargs: None
+
+    t0 = 10_000.0
+    window = _make_window("A", "win-a", end_time=t0 + 300, ptb=84198.0)
+
+    monkeypatch.setattr(bot_module.time, "time", lambda: t0)
+    await bot._on_book_update(window, "up")  # transition sets _last_book_sample_ts=t0
+
+    monkeypatch.setattr(bot_module.time, "time", lambda: t0 + 30.0)
+    await bot._on_book_update(window, "up")  # 30s elapsed → sample
+    monkeypatch.setattr(bot_module.time, "time", lambda: t0 + 45.0)
+    await bot._on_book_update(window, "up")  # 15s since last → no sample
+    monkeypatch.setattr(bot_module.time, "time", lambda: t0 + 60.0)
+    await bot._on_book_update(window, "up")  # 30s since last → sample
+
+    samples = get_book_samples(str(db_path), "win-a")
+    assert [s["sampled_at"] for s in samples] == [t0 + 30.0, t0 + 60.0]
+
+
+@pytest.mark.asyncio
+async def test_phase5_new_window_resets_cadence(tmp_path: Path, monkeypatch):
+    """A transition into a new window must reset the sample clock — first
+    sample of the new window is 30s from the transition, not from the last
+    sample of the previous window."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+    from polypocket.ledger import get_book_samples
+
+    db_path = tmp_path / "p5.db"
+    init_db(str(db_path))
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84250.0
+    bot.signal_engine.evaluate = lambda **kwargs: None
+
+    t0 = 10_000.0
+    window_a = _make_window("A", "win-a", end_time=t0 + 300, ptb=100.0)
+    window_b = _make_window("B", "win-b", end_time=t0 + 580, ptb=101.0)
+
+    monkeypatch.setattr(bot_module.time, "time", lambda: t0)
+    await bot._on_book_update(window_a, "up")
+    monkeypatch.setattr(bot_module.time, "time", lambda: t0 + 270.0)
+    await bot._on_book_update(window_a, "up")  # sample @ t0+270 for A
+    assert len(get_book_samples(str(db_path), "win-a")) == 1
+
+    # Transition to B at t0+290 (past A's end=t0+300? no — 290 < 300 so A not
+    # expired; but condition_id mismatch + incoming_is_live(B) is the trigger.
+    # B.start_time = end - 300 = t0+280, so B is live at t0+290).
+    monkeypatch.setattr(bot_module.time, "time", lambda: t0 + 290.0)
+    bot.binance._hires.append((window_a.end_time, 100.0))
+    await bot._on_book_update(window_b, "up")  # transition; no sample for B
+    assert get_book_samples(str(db_path), "win-b") == []
+
+    # 10s into B (t0+300): under cadence
+    monkeypatch.setattr(bot_module.time, "time", lambda: t0 + 300.0)
+    await bot._on_book_update(window_b, "up")
+    assert get_book_samples(str(db_path), "win-b") == []
+
+    # 30s past transition (t0+320): first sample for B
+    monkeypatch.setattr(bot_module.time, "time", lambda: t0 + 320.0)
+    await bot._on_book_update(window_b, "up")
+    assert len(get_book_samples(str(db_path), "win-b")) == 1
