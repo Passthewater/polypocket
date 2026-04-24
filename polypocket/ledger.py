@@ -96,6 +96,8 @@ def init_db(db_path: str) -> None:
                     quote_status TEXT,
                     up_book_json TEXT,
                     down_book_json TEXT,
+                    up_bids_json TEXT,
+                    down_bids_json TEXT,
                     trade_fired INTEGER,
                     skip_reason TEXT,
                     outcome TEXT,
@@ -104,6 +106,13 @@ def init_db(db_path: str) -> None:
                 )
                 """
             )
+            # Idempotent column adds for bid-side depth (post-2026-04-23).
+            snap_cols = {row[1] for row in conn.execute("PRAGMA table_info(window_snapshots)").fetchall()}
+            if "up_bids_json" not in snap_cols:
+                conn.execute("ALTER TABLE window_snapshots ADD COLUMN up_bids_json TEXT")
+            if "down_bids_json" not in snap_cols:
+                conn.execute("ALTER TABLE window_snapshots ADD COLUMN down_bids_json TEXT")
+
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_snapshots_window ON window_snapshots(window_slug)"
             )
@@ -353,9 +362,13 @@ def log_snapshot(
 
     up_book_json = None
     down_book_json = None
+    up_bids_json = None
+    down_bids_json = None
     if book_depth is not None:
         up_book_json = json.dumps(book_depth.get("up"))
         down_book_json = json.dumps(book_depth.get("down"))
+        up_bids_json = json.dumps(book_depth.get("up_bids"))
+        down_bids_json = json.dumps(book_depth.get("down_bids"))
 
     trade_fired_int = None
     if trade_fired is not None:
@@ -370,9 +383,10 @@ def log_snapshot(
                 sigma_5min, model_p_up, t_remaining,
                 up_ask, down_ask, market_p_up, edge, preview_side, quote_status,
                 up_book_json, down_book_json,
+                up_bids_json, down_bids_json,
                 trade_fired, skip_reason,
                 outcome, final_price
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 window_slug,
@@ -392,6 +406,8 @@ def log_snapshot(
                 stats.get("quote_status"),
                 up_book_json,
                 down_book_json,
+                up_bids_json,
+                down_bids_json,
                 trade_fired_int,
                 skip_reason,
                 outcome,
