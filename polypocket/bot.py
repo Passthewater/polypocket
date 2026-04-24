@@ -159,6 +159,7 @@ class Bot:
                         trade_fired=False,
                         skip_reason=self._window_skip_reason or "no-edge",
                         gate_config=snapshot_gate_config(),
+                        btc_path=self.binance.get_path(prev_window.start_time, now),
                     )
 
                 # G1: close snapshot for every expiring window, regardless of
@@ -186,6 +187,7 @@ class Bot:
                     final_price=final_btc,
                     outcome=btc_outcome,
                     gate_config=snapshot_gate_config(),
+                    btc_path=self.binance.get_path(prev_window.start_time, prev_window.end_time),
                 )
 
             if self._open_trade and self._current_window is not None:
@@ -559,6 +561,7 @@ class Bot:
             book_depth=book_depth,
             trade_fired=True,
             gate_config=snapshot_gate_config(),
+            btc_path=self.binance.get_path(window.start_time, time.time()),
         )
 
         if TRADING_MODE == "paper":
