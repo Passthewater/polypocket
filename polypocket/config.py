@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 # --- Signal thresholds ---
-MIN_EDGE_THRESHOLD = 0.03
+MIN_EDGE_THRESHOLD = 0.10
 # Ticks added to the pair-merge clearing price (1 - best_opp_bid) when
 # computing the edge gate. The gate uses the live-executable price, not the
 # snapshot ask — a BUY UP on a binary market clears via pair-merge against a
@@ -27,10 +27,11 @@ MIN_EDGE_THRESHOLD_DOWN = 0.10
 # unfavorable near the middle of the book.
 MAX_ENTRY_PRICE = 0.70
 # DOWN threshold (via `model_p_up <= 1 - MIN_MODEL_CONFIDENCE`) and the symmetric
-# floor for UP. UP gets its own, higher threshold because UP-side trades in the
-# 60–70% bucket have historically been -EV; see reports/2026-04-16-calibration.md.
+# floor for UP. Raised from 0.70 to 0.75 after gate-only replay on n=41 settled
+# fills (2026-04-24): UP at conf>=0.75 + threshold=0.10 reaches ~break-even
+# (-$0.003/trade) vs -$0.662/trade at conf>=0.70 + threshold=0.05. See #13.
 MIN_MODEL_CONFIDENCE = 0.60
-MIN_MODEL_CONFIDENCE_UP = 0.70
+MIN_MODEL_CONFIDENCE_UP = 0.75
 # --- Calibration (per-side shrinkage toward 0.5) ---
 # n=218 checkpoint: UP gap -4.4pts (converging, identity holds); DOWN gap at
 # k=0.30 grew to +12.3pts (under-confident), tripping the plan's pre-committed

@@ -19,7 +19,7 @@ from polypocket.config import (
 
 
 def test_defaults_are_sane():
-    assert MIN_EDGE_THRESHOLD == 0.03
+    assert MIN_EDGE_THRESHOLD == 0.10
     assert FEE_RATE == 0.072
     assert MIN_POSITION_USDC == 5.0
     assert MAX_POSITION_USDC == 20.0
@@ -30,7 +30,7 @@ def test_defaults_are_sane():
     assert WINDOW_ENTRY_MIN_REMAINING == 30
     assert TRADING_MODE in {"paper", "live"}
     assert MIN_MODEL_CONFIDENCE == 0.60
-    assert MIN_MODEL_CONFIDENCE_UP == 0.70
+    assert MIN_MODEL_CONFIDENCE_UP == 0.75
     assert MIN_MODEL_CONFIDENCE_UP > MIN_MODEL_CONFIDENCE
 
 
