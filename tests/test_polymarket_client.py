@@ -780,3 +780,15 @@ def test_submit_ioc_full_match_with_rounding_tolerance(mock_clob):
 
     assert fill.status == "filled"
     inst.cancel.assert_not_called()
+
+
+def test_polymarket_client_satisfies_live_order_client_protocol():
+    """Protocol drift guard. If a future change renames an argument on
+    PolymarketClient without updating the executor's Protocol or call sites,
+    this test catches it at import time. Phase 4's changes sit in
+    executor.py but the client's call signatures are the hot seam."""
+    for method in (
+        "submit_fok", "submit_ioc", "cancel_order",
+        "get_usdc_balance", "get_settlement_info", "get_order_status",
+    ):
+        assert hasattr(PolymarketClient, method), f"PolymarketClient missing {method}"
