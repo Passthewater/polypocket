@@ -151,7 +151,8 @@ def main():
     p.add_argument("--max-loss", type=float, default=20.0)
     p.add_argument("--max-wall-clock-days", type=float, default=7.0)
     p.add_argument("--reject-breaker-after", type=int, default=10)
-    p.add_argument("--reject-breaker-pct", type=float, default=0.5)
+    p.add_argument("--reject-breaker-pct", type=float,
+                   default=float(os.environ.get("REJECT_BREAKER_PCT", "0.5")))
     args = p.parse_args()
     if not args.since:
         p.error("--since required (or create .cohort_start)")
