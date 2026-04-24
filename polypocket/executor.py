@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -75,11 +76,58 @@ def reconcile_recovered_trade(
     CLOB error, unknown status, resting order) returns the existing local
     status unchanged and writes nothing, preserving today's recovery
     behavior when CLOB evidence isn't available.
+
+    Two recovery paths:
+    - reserved/open trades: query /order status; promote or demote based on
+      matched / canceled / unmatched.
+    - rejected trades with a lingering external_order_id: stranded-fill
+      sweep. If /trades shows shares actually matched (despite the local
+      rejected status — usually from a crash between post and settle, or a
+      settlement-lookup race), promote the trade to open with corrected
+      size / entry_price so the window can settle normally.
     """
     current_status = trade["status"]
     order_id = trade.get("external_order_id")
     if not order_id or client is None:
         return current_status
+
+    if current_status == "rejected":
+        # Stranded-fill sweep: if anything actually matched on-chain, the
+        # local 'rejected' row is wrong and we need to resume the position.
+        try:
+            info = client.get_settlement_info(order_id)
+        except Exception as exc:
+            log.warning(
+                "reconcile: get_settlement_info failed for rejected trade %s "
+                "order %s: %s",
+                trade["id"], order_id, exc,
+            )
+            return current_status
+        if info is None or info.shares_held <= 0:
+            return current_status  # truly rejected — nothing stranded
+        avg_price = (
+            info.cost_usdc / info.shares_held
+            if info.shares_held > 0
+            else trade["entry_price"]
+        )
+        log.error(
+            "reconcile: STRANDED FILL — trade %s order %s has %.4f shares "
+            "@ $%.4f on-chain; promoting rejected → open",
+            trade["id"], order_id, info.shares_held, avg_price,
+        )
+        update_trade(
+            db_path, trade["id"], outcome=None, pnl=None, status="open",
+            size=info.shares_held, entry_price=avg_price,
+        )
+        # update_trade's error column is COALESCE-preserved; clear the stale
+        # 'gtc-no-fill' / 'settlement-lookup' text so the promoted row isn't
+        # confusing on post-mortem.
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                "UPDATE trades SET error = NULL WHERE id = ?", (trade["id"],),
+            )
+            conn.commit()
+        return "open"
 
     try:
         resp = client.get_order_status(order_id)

@@ -698,6 +698,119 @@ def test_reconcile_clob_error_preserves_local_status():
     os.unlink(db_path)
 
 
+def _seed_rejected_trade_with_oid(db_path, window_slug, order_id, error="gtc-no-fill"):
+    """Seed a rejected live trade carrying an external_order_id — simulates
+    a crash between post and settle, or a historical settlement-lookup race."""
+    trade_id = persist_trade(
+        db_path=db_path,
+        window_slug=window_slug,
+        side="up",
+        entry_price=0.55,
+        size=10.0,
+        fees=0.0,
+        model_p_up=0.7,
+        market_p_up=0.55,
+        edge=0.15,
+        outcome=None,
+        pnl=None,
+        status="rejected",
+    )
+    update_trade(db_path, trade_id, outcome=None, pnl=None, status="rejected",
+                 external_order_id=order_id, error=error)
+    return trade_id
+
+
+def test_reconcile_rejected_with_stranded_fill_promotes_to_open():
+    """If a locally-rejected trade's order actually matched on-chain, the
+    reconciler must promote it to open and overwrite size / entry_price."""
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_rejected_trade_with_oid(
+        db_path, "btc-5m-stranded", order_id="0xstranded",
+    )
+    trade = find_trade_by_window_slug(db_path, "btc-5m-stranded")
+
+    client = Mock()
+    # 6.3 shares @ effective $0.50/share (3.15 USDC spent).
+    client.get_settlement_info.return_value = SettlementInfo(
+        shares_held=6.3, cost_usdc=3.15,
+    )
+
+    result = reconcile_recovered_trade(db_path, trade, client)
+
+    assert result == "open"
+    row = find_trade_by_window_slug(db_path, "btc-5m-stranded")
+    assert row["status"] == "open"
+    assert row["size"] == pytest.approx(6.3, abs=0.001)
+    assert row["entry_price"] == pytest.approx(0.50, abs=0.001)
+    # Stale error text cleared so the promoted row isn't confusing on post-mortem.
+    assert row["error"] is None
+    os.unlink(db_path)
+
+
+def test_reconcile_rejected_with_no_stranded_fill_stays_rejected():
+    """Zero-share settlement → trade was genuinely rejected, leave as-is."""
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_rejected_trade_with_oid(
+        db_path, "btc-5m-truly-rej", order_id="0xclean",
+    )
+    trade = find_trade_by_window_slug(db_path, "btc-5m-truly-rej")
+
+    client = Mock()
+    client.get_settlement_info.return_value = SettlementInfo(
+        shares_held=0.0, cost_usdc=0.0,
+    )
+
+    result = reconcile_recovered_trade(db_path, trade, client)
+
+    assert result == "rejected"
+    row = find_trade_by_window_slug(db_path, "btc-5m-truly-rej")
+    assert row["status"] == "rejected"
+    assert row["size"] == pytest.approx(10.0)  # unchanged
+    os.unlink(db_path)
+
+
+def test_reconcile_rejected_settlement_error_preserves_local_status():
+    """If /trades lookup fails, don't guess — leave the trade as-is."""
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_rejected_trade_with_oid(
+        db_path, "btc-5m-rej-err", order_id="0xerr",
+    )
+    trade = find_trade_by_window_slug(db_path, "btc-5m-rej-err")
+
+    client = Mock()
+    client.get_settlement_info.side_effect = Exception("CLOB 500")
+
+    result = reconcile_recovered_trade(db_path, trade, client)
+
+    assert result == "rejected"
+    assert find_trade_by_window_slug(db_path, "btc-5m-rej-err")["status"] == "rejected"
+    os.unlink(db_path)
+
+
+def test_reconcile_rejected_without_order_id_is_noop():
+    """A rejected trade that never got an order_id can't be reconciled."""
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = persist_trade(
+        db_path=db_path, window_slug="btc-5m-rej-noid", side="up",
+        entry_price=0.55, size=10.0, fees=0.0, model_p_up=0.7,
+        market_p_up=0.55, edge=0.15, outcome=None, pnl=None, status="rejected",
+    )
+    trade = find_trade_by_window_slug(db_path, "btc-5m-rej-noid")
+    assert trade["external_order_id"] is None
+
+    client = Mock()
+    result = reconcile_recovered_trade(db_path, trade, client)
+
+    assert result == "rejected"
+    client.get_settlement_info.assert_not_called()
+    client.get_order_status.assert_not_called()
+    os.unlink(db_path)
+
+
 def _sample_signal():
     return Signal(
         side="up",
