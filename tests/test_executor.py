@@ -923,3 +923,198 @@ def test_execute_live_trade_logs_dust_warning(caplog):
     assert result.success
     assert any("dust-fill" in r.getMessage() for r in caplog.records)
     os.unlink(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 (G4): order_events lifecycle telemetry
+# ---------------------------------------------------------------------------
+
+
+def _order_events(db_path, trade_id):
+    from polypocket.ledger import get_order_events
+    return get_order_events(db_path, trade_id)
+
+
+def test_execute_live_trade_writes_submit_ack_fill_events():
+    db_path = make_db()
+    client = RecordingLiveOrderClient()
+    result = execute_live_trade(
+        db_path=db_path, signal=_sample_signal(),
+        entry_price=0.51, size=7.0, window_slug="w-fill",
+        token_id="T", condition_id="C", client=client, limit_price=0.57,
+        submit_book_age_s_monotonic=0.42,
+    )
+    assert result.success is True
+    events = _order_events(db_path, result.trade_id)
+    assert [e["event_type"] for e in events] == ["submit", "ack", "fill"]
+    # Timestamps strictly monotonic (or at least non-decreasing — test system clocks vary)
+    assert events[0]["event_ts_wall"] <= events[1]["event_ts_wall"] <= events[2]["event_ts_wall"]
+    import json
+    submit_payload = json.loads(events[0]["payload_json"])
+    assert submit_payload["book_age_s_monotonic"] == 0.42
+    assert submit_payload["intended_size"] == 7.0
+    # submit has no external_order_id (it's pre-call); ack and fill do
+    assert events[0]["external_order_id"] is None
+    assert events[1]["external_order_id"] == "ord-1"
+    assert events[2]["external_order_id"] == "ord-1"
+    os.unlink(db_path)
+
+
+def test_execute_live_trade_writes_submit_ack_reject_events():
+    db_path = make_db()
+    client = RejectingLiveOrderClient(error="no match")
+    result = execute_live_trade(
+        db_path=db_path, signal=_sample_signal(),
+        entry_price=0.51, size=7.0, window_slug="w-rej",
+        token_id="T", condition_id="C", client=client, limit_price=0.57,
+    )
+    assert result.success is False
+    events = _order_events(db_path, result.trade_id)
+    assert [e["event_type"] for e in events] == ["submit", "ack", "reject"]
+    import json
+    reject_payload = json.loads(events[2]["payload_json"])
+    assert reject_payload["error"] == "no match"
+    assert reject_payload["clob_status"] == "rejected"
+    os.unlink(db_path)
+
+
+def test_execute_live_trade_submit_payload_book_age_is_none_when_no_timestamp():
+    db_path = make_db()
+    client = RecordingLiveOrderClient()
+    result = execute_live_trade(
+        db_path=db_path, signal=_sample_signal(),
+        entry_price=0.51, size=7.0, window_slug="w-no-age",
+        token_id="T", condition_id="C", client=client, limit_price=0.57,
+        # submit_book_age_s_monotonic default → None
+    )
+    events = _order_events(db_path, result.trade_id)
+    import json
+    submit_payload = json.loads(events[0]["payload_json"])
+    assert submit_payload["book_age_s_monotonic"] is None
+    os.unlink(db_path)
+
+
+def test_execute_paper_trade_writes_fill_event_open_branch():
+    db_path = make_db()
+    result = execute_paper_trade(
+        db_path=db_path, signal=_sample_signal(),
+        entry_price=0.51, size=7.0, window_slug="w-paper-open",
+    )
+    assert result.success is True
+    events = _order_events(db_path, result.trade_id)
+    assert [e["event_type"] for e in events] == ["fill"]
+    import json
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["filled_size"] == 7.0
+    assert payload["avg_price"] == 0.51
+    os.unlink(db_path)
+
+
+def test_execute_paper_trade_writes_fill_event_immediate_settle_branch():
+    db_path = make_db()
+    result = execute_paper_trade(
+        db_path=db_path, signal=_sample_signal(),
+        entry_price=0.51, size=7.0, window_slug="w-paper-settled",
+        outcome="up",
+    )
+    assert result.success is True
+    events = _order_events(db_path, result.trade_id)
+    # fill event records entry, not settlement
+    assert [e["event_type"] for e in events] == ["fill"]
+    import json
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["filled_size"] == 7.0
+    assert payload["avg_price"] == 0.51
+    os.unlink(db_path)
+
+
+def test_execute_paper_trade_insufficient_balance_writes_no_events():
+    db_path = make_db()
+    # Drain the paper balance so every trade fails the balance gate.
+    from polypocket.ledger import deduct_paper_balance, get_paper_balance
+    deduct_paper_balance(db_path, get_paper_balance(db_path))
+    result = execute_paper_trade(
+        db_path=db_path, signal=_sample_signal(),
+        entry_price=0.51, size=7.0, window_slug="w-paper-nb",
+    )
+    assert result.success is False
+    # No trade_id since log_trade is never called.
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(db_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM order_events").fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 0
+    os.unlink(db_path)
+
+
+def test_reconcile_writes_stranded_fill_promote_event():
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_rejected_trade_with_oid(
+        db_path, "btc-5m-event-stranded", order_id="0xstr",
+    )
+    trade = find_trade_by_window_slug(db_path, "btc-5m-event-stranded")
+    client = Mock()
+    client.get_settlement_info.return_value = SettlementInfo(
+        shares_held=6.3, cost_usdc=3.15,
+    )
+    reconcile_recovered_trade(db_path, trade, client)
+    events = _order_events(db_path, trade_id)
+    assert [e["event_type"] for e in events] == ["stranded_fill_promote"]
+    import json
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["from_status"] == "rejected"
+    assert payload["shares_held"] == pytest.approx(6.3)
+    assert payload["cost_usdc"] == pytest.approx(3.15)
+    os.unlink(db_path)
+
+
+def test_reconcile_writes_matched_event():
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_reserved_trade(db_path, "btc-5m-evt-matched", order_id="0xabc")
+    trade = find_trade_by_window_slug(db_path, "btc-5m-evt-matched")
+    client = Mock()
+    client.get_order_status.return_value = {"status": "matched"}
+    reconcile_recovered_trade(db_path, trade, client)
+    events = _order_events(db_path, trade_id)
+    assert [e["event_type"] for e in events] == ["reconcile_matched"]
+    import json
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["clob_status"] == "matched"
+    os.unlink(db_path)
+
+
+def test_reconcile_writes_canceled_event():
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_reserved_trade(db_path, "btc-5m-evt-canceled", order_id="0xabc")
+    trade = find_trade_by_window_slug(db_path, "btc-5m-evt-canceled")
+    client = Mock()
+    client.get_order_status.return_value = {"status": "canceled"}
+    reconcile_recovered_trade(db_path, trade, client)
+    events = _order_events(db_path, trade_id)
+    assert [e["event_type"] for e in events] == ["reconcile_canceled"]
+    os.unlink(db_path)
+
+
+def test_reconcile_writes_unknown_event_preserves_local_status():
+    from unittest.mock import Mock
+    db_path = make_db()
+    trade_id = _seed_reserved_trade(db_path, "btc-5m-evt-unknown", order_id="0xabc")
+    trade = find_trade_by_window_slug(db_path, "btc-5m-evt-unknown")
+    client = Mock()
+    client.get_order_status.return_value = {"status": "weird-new-state"}
+    result = reconcile_recovered_trade(db_path, trade, client)
+    # local status unchanged
+    assert result == "reserved"
+    assert find_trade_by_window_slug(db_path, "btc-5m-evt-unknown")["status"] == "reserved"
+    # event still written
+    events = _order_events(db_path, trade_id)
+    assert [e["event_type"] for e in events] == ["reconcile_unknown"]
+    import json
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["clob_status_raw"] == "weird-new-state"
+    os.unlink(db_path)

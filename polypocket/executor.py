@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -12,6 +13,7 @@ from polypocket.ledger import (
     deduct_paper_balance,
     get_paper_balance,
     find_trade_by_window_slug,
+    log_order_event,
     log_trade,
     update_trade,
 )
@@ -127,6 +129,17 @@ def reconcile_recovered_trade(
                 "UPDATE trades SET error = NULL WHERE id = ?", (trade["id"],),
             )
             conn.commit()
+        log_order_event(
+            db_path, trade["id"], trade["window_slug"], "stranded_fill_promote",
+            time.time(),
+            payload={
+                "from_status": "rejected",
+                "shares_held": info.shares_held,
+                "cost_usdc": info.cost_usdc,
+                "avg_price": avg_price,
+            },
+            external_order_id=order_id,
+        )
         return "open"
 
     try:
@@ -146,15 +159,35 @@ def reconcile_recovered_trade(
     if clob_status == "matched":
         if current_status != "open":
             update_trade(db_path, trade["id"], outcome=None, pnl=None, status="open")
+        log_order_event(
+            db_path, trade["id"], trade["window_slug"], "reconcile_matched",
+            time.time(),
+            payload={"from_status": current_status, "clob_status": clob_status},
+            external_order_id=order_id,
+        )
         return "open"
 
     if clob_status in {"canceled", "cancelled", "unmatched"}:
         update_trade(db_path, trade["id"], outcome=None, pnl=None, status="rejected")
+        log_order_event(
+            db_path, trade["id"], trade["window_slug"], "reconcile_canceled",
+            time.time(),
+            payload={"from_status": current_status, "clob_status": clob_status},
+            external_order_id=order_id,
+        )
         return "rejected"
 
     log.warning(
         "reconcile: unexpected CLOB status %r for trade %s order %s; keeping local %r",
         clob_status, trade["id"], order_id, current_status,
+    )
+    log_order_event(
+        db_path, trade["id"], trade["window_slug"], "reconcile_unknown",
+        time.time(),
+        # str() guards against non-serializable raw values (e.g., Mock in tests)
+        # while still preserving the post-mortem signal of what CLOB returned.
+        payload={"from_status": current_status, "clob_status_raw": str(resp.get("status"))},
+        external_order_id=order_id,
     )
     return current_status
 
@@ -226,6 +259,15 @@ def execute_paper_trade(
     if outcome is not None:
         credit_paper_balance(db_path, payout)
 
+    # G4: paper path writes exactly one `fill` event per successfully-logged
+    # trade. No submit/ack — there is no external client call to timestamp.
+    # Records the entry even when the trade immediately settles (outcome set);
+    # settlement lives on the trades row.
+    log_order_event(
+        db_path, trade_id, window_slug, "fill", time.time(),
+        payload={"filled_size": size, "avg_price": entry_price},
+    )
+
     if pnl is not None:
         log.info(
             "Paper trade %s: %s @ $%.3f x%.1f -> %s (P&L: $%.2f)",
@@ -250,6 +292,7 @@ def execute_live_trade(
     condition_id: str,
     client: LiveOrderClient,
     limit_price: float,
+    submit_book_age_s_monotonic: float | None = None,
 ) -> TradeResult:
     existing_trade = find_trade_by_window_slug(db_path, window_slug)
     if existing_trade is not None:
@@ -281,6 +324,20 @@ def execute_live_trade(
             return consumed
         raise
 
+    # G4: order lifecycle telemetry. `submit` is written before the client
+    # call; `ack` immediately after; then one of `fill` or `reject` based on
+    # fill.status. The book itself is NOT re-serialized here — it's already
+    # captured in the concurrent `decision` snapshot; only book age travels.
+    log_order_event(
+        db_path, trade_id, window_slug, "submit", time.time(),
+        payload={
+            "side": signal.side,
+            "intended_size": size,
+            "entry_price": entry_price,
+            "limit_price": limit_price,
+            "book_age_s_monotonic": submit_book_age_s_monotonic,
+        },
+    )
     fill = client.submit_ioc(
         side=signal.side,
         price=entry_price,
@@ -289,6 +346,11 @@ def execute_live_trade(
         condition_id=condition_id,
         limit_price=limit_price,
     )
+    log_order_event(
+        db_path, trade_id, window_slug, "ack", time.time(),
+        payload={"status": fill.status, "error": fill.error},
+        external_order_id=fill.order_id,
+    )
 
     if fill.status == "filled":
         update_trade(
@@ -296,6 +358,11 @@ def execute_live_trade(
             external_order_id=fill.order_id,
             size=fill.filled_size,
             entry_price=fill.avg_price,
+        )
+        log_order_event(
+            db_path, trade_id, window_slug, "fill", time.time(),
+            payload={"filled_size": fill.filled_size, "avg_price": fill.avg_price},
+            external_order_id=fill.order_id,
         )
         notional = fill.filled_size * (fill.avg_price or 0.0)
         if notional < MIN_POSITION_USDC * 0.25:
@@ -316,6 +383,11 @@ def execute_live_trade(
         db_path, trade_id, outcome=None, pnl=None, status="rejected",
         external_order_id=fill.order_id,
         error=fill.error,
+    )
+    log_order_event(
+        db_path, trade_id, window_slug, "reject", time.time(),
+        payload={"error": fill.error, "clob_status": fill.status},
+        external_order_id=fill.order_id,
     )
     log.warning(
         "Live reject/error: %s %s @%.4f x%.2f: %s",

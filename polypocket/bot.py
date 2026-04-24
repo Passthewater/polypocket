@@ -576,6 +576,10 @@ class Bot:
             if self.live_order_client is None:
                 raise RuntimeError("live_order_client is required for live trading mode")
             token_id = window.up_token_id if signal.side == "up" else window.down_token_id
+            book_age = (
+                time.monotonic() - window.book_updated_at
+                if window.book_updated_at is not None else None
+            )
             result = execute_live_trade(
                 db_path=self.db_path,
                 signal=signal,
@@ -586,6 +590,7 @@ class Bot:
                 condition_id=window.condition_id,
                 client=self.live_order_client,
                 limit_price=limit_price,
+                submit_book_age_s_monotonic=book_age,
             )
 
             # Diagnostic log: compare snapshot vs. realized fill for root-cause analysis.

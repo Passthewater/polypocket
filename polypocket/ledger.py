@@ -128,6 +128,29 @@ def init_db(db_path: str) -> None:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON window_snapshots(timestamp DESC)"
             )
+            # G4: order lifecycle telemetry. FK is declared for documentation;
+            # SQLite does not enforce without PRAGMA foreign_keys=ON (trades is
+            # append-only today, so orphan rows are a theoretical risk).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS order_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id INTEGER NOT NULL,
+                    window_slug TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    event_ts_wall REAL NOT NULL,
+                    external_order_id TEXT,
+                    payload_json TEXT NOT NULL,
+                    FOREIGN KEY (trade_id) REFERENCES trades(id)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_order_events_trade ON order_events(trade_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_order_events_window ON order_events(window_slug)"
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -438,5 +461,44 @@ def get_snapshots_for_window(db_path: str, window_slug: str) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM window_snapshots WHERE window_slug = ? ORDER BY id",
             (window_slug,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def log_order_event(
+    db_path: str,
+    trade_id: int,
+    window_slug: str,
+    event_type: str,
+    event_ts_wall: float,
+    payload: dict,
+    external_order_id: str | None = None,
+) -> None:
+    """Write one row to `order_events` for an order-lifecycle transition."""
+    import json
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO order_events (
+                trade_id, window_slug, event_type, event_ts_wall,
+                external_order_id, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trade_id, window_slug, event_type, event_ts_wall,
+                external_order_id, json.dumps(payload),
+            ),
+        )
+        conn.commit()
+
+
+def get_order_events(db_path: str, trade_id: int) -> list[dict]:
+    """Retrieve all order events for a given trade, oldest first."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM order_events WHERE trade_id = ? ORDER BY id",
+            (trade_id,),
         ).fetchall()
         return [dict(row) for row in rows]
