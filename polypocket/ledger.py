@@ -112,6 +112,9 @@ def init_db(db_path: str) -> None:
                 conn.execute("ALTER TABLE window_snapshots ADD COLUMN up_bids_json TEXT")
             if "down_bids_json" not in snap_cols:
                 conn.execute("ALTER TABLE window_snapshots ADD COLUMN down_bids_json TEXT")
+            # G2: persist gate-config snapshot per decision.
+            if "gate_config_json" not in snap_cols:
+                conn.execute("ALTER TABLE window_snapshots ADD COLUMN gate_config_json TEXT")
 
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_snapshots_window ON window_snapshots(window_slug)"
@@ -356,6 +359,7 @@ def log_snapshot(
     skip_reason: str | None = None,
     outcome: str | None = None,
     final_price: float | None = None,
+    gate_config: dict | None = None,
 ) -> None:
     """Write a window snapshot (open/decision/close) for finetuning data capture."""
     import json
@@ -374,6 +378,8 @@ def log_snapshot(
     if trade_fired is not None:
         trade_fired_int = 1 if trade_fired else 0
 
+    gate_config_json = None if gate_config is None else json.dumps(gate_config, sort_keys=True)
+
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute(
             """
@@ -385,8 +391,9 @@ def log_snapshot(
                 up_book_json, down_book_json,
                 up_bids_json, down_bids_json,
                 trade_fired, skip_reason,
-                outcome, final_price
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                outcome, final_price,
+                gate_config_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 window_slug,
@@ -412,6 +419,7 @@ def log_snapshot(
                 skip_reason,
                 outcome,
                 final_price,
+                gate_config_json,
             ),
         )
         conn.commit()
