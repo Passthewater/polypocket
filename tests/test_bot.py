@@ -1435,8 +1435,9 @@ async def test_bot_floor_gate_engages_when_fillable_below_min_position(
 ):
     """Pre-trade gate skips when fillable * limit_price * MIN_FILL_RATIO < MIN_POSITION_USDC.
 
-    MIN_POSITION_USDC=5, down_bid=0.50, IOC_BUFFER_TICKS=8 -> limit=0.58.
-    fillable=10: 10 * 0.58 * 0.5 = 2.9 < 5 -> skip.
+    MIN_POSITION_USDC=5, best down bid=0.50 -> limit = 1 - 0.50 + buffer.
+    fillable=10 at the limit's threshold, slice value
+    = 10 * limit * 0.5; at IOC_BUFFER_TICKS=15 this is 3.25 < 5 -> skip.
     """
     monkeypatch.setattr("polypocket.bot.MIN_POSITION_USDC", 5.0, raising=False)
     client = _CapturingClient()

@@ -4,6 +4,7 @@ from polypocket.config import (
     FEE_RATE,
     MAX_CONSECUTIVE_LOSSES,
     MAX_DAILY_LOSS,
+    MAX_EDGE_THRESHOLD_UP,
     MAX_POSITION_USDC,
     MIN_EDGE_THRESHOLD,
     MIN_MODEL_CONFIDENCE,
@@ -32,6 +33,8 @@ def test_defaults_are_sane():
     assert MIN_MODEL_CONFIDENCE == 0.60
     assert MIN_MODEL_CONFIDENCE_UP == 0.75
     assert MIN_MODEL_CONFIDENCE_UP > MIN_MODEL_CONFIDENCE
+    assert MAX_EDGE_THRESHOLD_UP == 0.25
+    assert MAX_EDGE_THRESHOLD_UP > MIN_EDGE_THRESHOLD
 
 
 def test_dynamic_sizing_params():

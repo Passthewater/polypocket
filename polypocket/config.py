@@ -26,6 +26,12 @@ MIN_EDGE_THRESHOLD_DOWN = 0.10
 # both sides over 203 trades — fee drag plus compressed upside make the math
 # unfavorable near the middle of the book.
 MAX_ENTRY_PRICE = 0.70
+# Cap on the UP calibrated edge. Live corpus n=117 (2026-04-23): UP trades with
+# edge ≥0.25 went 3/13 (23% WR) for −$40.68 PnL — 85% of total loss comes from
+# this single bucket. Neighboring bin 0.20–0.25 was 4/5 (80% WR, +$2.58), so
+# the cliff is in the data, not smooth. Matches issue #13's "0.80+ bin may be
+# miscalibrated" warning. No symmetric DOWN cap: 0.25+ DOWN was n=3.
+MAX_EDGE_THRESHOLD_UP = 0.25
 # DOWN threshold (via `model_p_up <= 1 - MIN_MODEL_CONFIDENCE`) and the symmetric
 # floor for UP. Raised from 0.70 to 0.75 after gate-only replay on n=41 settled
 # fills (2026-04-24): UP at conf>=0.75 + threshold=0.10 reaches ~break-even
