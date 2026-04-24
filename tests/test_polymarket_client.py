@@ -462,19 +462,50 @@ def test_submit_ioc_no_match_returns_rejected(mock_clob):
     assert fill.status == "rejected"
     assert fill.error == "gtc-no-fill"
     assert fill.filled_size == 0.0
+    assert fill.order_id == "abc"  # persisted for reconciler
     inst.cancel.assert_called_once()
+    # Fast path: no /trades lookup when nothing matched.
+    inst.get_trades.assert_not_called()
 
 
-def test_submit_ioc_settlement_failure_preserves_order_id(mock_clob):
-    """get_settlement_info failure must still return order_id so reconciler can recover."""
+def test_submit_ioc_no_match_skips_settlement_even_if_order_returns_none(mock_clob):
+    """size_matched=0 + null /order body must still return gtc-no-fill (not error).
+
+    Historically this produced `settlement-lookup: 'NoneType' object has no
+    attribute 'get'` — the fast-path now sidesteps the /trades lookup when
+    nothing matched, eliminating that race.
+    """
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {
+        "success": True, "status": "unmatched", "orderID": "abc",
+    }
+    # First get_order: returns None (server hasn't indexed order yet).
+    inst.get_order.return_value = None
+    inst.cancel.return_value = {"canceled": ["abc"]}
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
+
+    assert fill.status == "rejected"
+    assert fill.error == "gtc-no-fill"
+    assert fill.order_id == "abc"
+    inst.get_trades.assert_not_called()
+
+
+def test_submit_ioc_settlement_failure_falls_back_to_estimate(mock_clob):
+    """When size_matched>0 and /trades lookup fails, the bot must not drop the
+    fill. Prior behavior returned `status=error` which stranded the position
+    under the rejected row; new behavior logs loudly and falls back to a
+    pessimistic estimate (shares = size_matched × (1 − fee), cost = limit)."""
     client, inst = _make_client(mock_clob)
     inst.create_market_order.return_value = MagicMock()
     inst.post_order.return_value = {
         "success": True, "status": "matched", "orderID": "abc",
     }
-    inst.get_order.return_value = {"size_matched": "7.0", "associate_trades": []}
-    # get_settlement_info internally calls get_order again then get_trades;
-    # make the second get_order call raise to simulate a lookup failure.
+    # First get_order: matched partially. Second get_order (inside
+    # get_settlement_info): server hiccup.
     inst.get_order.side_effect = [
         {"size_matched": "7.0"},   # first call: check fully_matched
         RuntimeError("CLOB 500"),  # second call: inside get_settlement_info
@@ -484,9 +515,47 @@ def test_submit_ioc_settlement_failure_preserves_order_id(mock_clob):
                              token_id="TKN-UP", condition_id="0xCOND",
                              limit_price=0.57)
 
-    assert fill.status == "error"
+    # taker_base_fee=1000 bps -> estimate shares = 7.0 * (1 - 0.10) = 6.3
+    assert fill.status == "filled"
     assert fill.order_id == "abc"
-    assert "settlement-lookup" in fill.error
+    assert fill.filled_size == pytest.approx(6.3, abs=0.001)
+    assert fill.avg_price == pytest.approx(0.57)  # limit_price as pessimistic cost proxy
+    assert fill.error is None
+
+
+def test_submit_ioc_settlement_returns_none_body_falls_back_to_estimate(mock_clob):
+    """Same path as above but via the None-guard: get_settlement_info's own
+    get_order returns None → zero SettlementInfo → submit_ioc sees
+    info.shares_held=0 with size_matched>0 and falls back to estimate."""
+    client, inst = _make_client(mock_clob)
+    inst.create_market_order.return_value = MagicMock()
+    inst.post_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
+    inst.get_order.side_effect = [
+        {"size_matched": "7.0"},   # first call: check fully_matched
+        None,                      # second call: null body
+    ]
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
+
+    assert fill.status == "filled"
+    assert fill.order_id == "abc"
+    assert fill.filled_size == pytest.approx(6.3, abs=0.001)
+
+
+def test_get_settlement_info_handles_null_order_body(mock_clob):
+    """Bare None-guard test on get_settlement_info itself."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = None
+
+    info = client.get_settlement_info("0xOID")
+
+    assert info.shares_held == 0.0
+    assert info.cost_usdc == 0.0
+    inst.get_trades.assert_not_called()
 
 
 def test_submit_ioc_post_raises_returns_error(mock_clob):
@@ -610,6 +679,52 @@ def test_tick_safe_size_handles_known_failing_trade_45():
     assert math.floor(scaled) == round(scaled), (
         f"size={result} amount={amount} scaled={scaled} still drifts"
     )
+
+
+def test_tick_safe_size_reconstructed_ratio_is_clean_through_real_lib():
+    """End-to-end invariant: for any (size, limit) _tick_safe_size approves,
+    the real py_clob_client.get_market_order_amounts must produce a
+    maker_wei/taker_wei ratio that's a clean multiple of 0.01 — that's what
+    the server's tick-size rule actually checks. Runs for the concrete
+    historical failing pairs plus a dense sweep of the (limit, size) space
+    relevant to 5m BTC markets.
+    """
+    from py_clob_client.order_builder.builder import OrderBuilder, ROUNDING_CONFIG
+    from py_clob_client.signer import Signer
+
+    # A real OrderBuilder needs a signer and chain id, but get_market_order_amounts
+    # is purely arithmetic on its args — we just need the method.
+    signer = Signer(private_key="0x" + "1" * 64, chain_id=137)
+    builder = OrderBuilder(signer=signer, sig_type=1, funder="0x" + "2" * 40)
+    # BTC up/down markets use 0.01 ticks.
+    round_config = ROUNDING_CONFIG["0.01"]
+
+    # Historical failing cases + dense regression sweep.
+    historical = [(12, 0.38), (7, 0.58), (10, 0.67)]
+    sweep = [
+        (s, round(limit_cents / 100.0, 2))
+        for limit_cents in range(5, 95)
+        for s in range(1, 40)
+    ]
+
+    for (target_size, limit) in historical + sweep:
+        approved = _tick_safe_size(target_size, limit)
+        if approved is None:
+            # Unfixable by search window — acceptable; submit_ioc skips these.
+            continue
+        amount = round(approved * limit, 2)
+        maker_wei, taker_wei = builder.get_market_order_amounts(
+            amount, limit, round_config,
+        )
+        if taker_wei == 0:
+            continue
+        ratio = maker_wei / taker_wei
+        ratio_cents = round(ratio * 100)
+        assert abs(ratio - ratio_cents / 100) < 1e-9, (
+            f"server-side tick violation: size={approved} limit={limit} "
+            f"amount={amount} maker_wei={maker_wei} taker_wei={taker_wei} "
+            f"ratio={ratio!r}"
+        )
 
 
 def test_submit_ioc_quantizes_to_tick_safe_size(mock_clob):

@@ -260,12 +260,13 @@ class PolymarketClient:
 
         # Check how much matched before deciding whether to cancel remainder.
         # Skip cancel if order fully matched (server errors on cancel-of-filled).
+        size_matched = 0.0
         try:
             order_status = self._client.get_order(order_id)
-            size_matched = float(order_status.get("size_matched", 0) or 0)
+            if order_status:
+                size_matched = float(order_status.get("size_matched", 0) or 0)
         except Exception as exc:
             log.warning("submit_ioc: get_order check failed for %s: %s", order_id, exc)
-            size_matched = 0.0
 
         # Compare against the integer size we actually submitted, not the
         # caller's pre-quantization float size.
@@ -273,20 +274,41 @@ class PolymarketClient:
         if not fully_matched:
             self.cancel_order(order_id)
 
+        # Fast path: nothing matched, so skip the /trades settlement lookup
+        # entirely. Avoids hitting the /order null-body race when the server
+        # hasn't indexed the cancel yet — which previously propagated as a
+        # spurious `settlement-lookup: NoneType` error and lost the
+        # external_order_id linkage for the reconciler.
+        if size_matched <= 0:
+            return FillResult(
+                status="rejected", order_id=order_id, filled_size=0.0,
+                avg_price=None, error="gtc-no-fill",
+            )
+
         # Derive real fill from per-fill /trades data (post-fee shares).
         try:
             info = self.get_settlement_info(order_id)
         except Exception as exc:
             log.warning("submit_ioc: get_settlement_info failed for %s: %s", order_id, exc)
-            return FillResult(
-                status="error", order_id=order_id, filled_size=0.0,
-                avg_price=None, error=f"settlement-lookup: {exc}",
-            )
+            info = SettlementInfo(shares_held=0.0, cost_usdc=0.0)
 
+        # Degraded path: first get_order saw a real match but /trades is
+        # empty (null body, indexing lag, or partial /trades propagation).
+        # Fall back to a pessimistic estimate from the known size_matched +
+        # market fee — better than marking a real fill as rejected, which
+        # would strand the position.
         if info.shares_held <= 0:
+            fee_bps = self._fee_rate_bps(condition_id)
+            est_shares = size_matched * (1.0 - fee_bps / 10_000.0)
+            log.error(
+                "submit_ioc: settlement data unavailable for %s with "
+                "size_matched=%.4f; using pessimistic estimate "
+                "shares=%.4f cost≈$%.4f (fill may have landed better)",
+                order_id, size_matched, est_shares, size_matched * limit_price,
+            )
             return FillResult(
-                status="rejected", order_id=order_id, filled_size=0.0,
-                avg_price=None, error="gtc-no-fill",
+                status="filled", order_id=order_id,
+                filled_size=est_shares, avg_price=limit_price, error=None,
             )
 
         avg_price = info.cost_usdc / info.shares_held if info.shares_held > 0 else price
@@ -354,6 +376,12 @@ class PolymarketClient:
             return SettlementInfo(shares_held=0.0, cost_usdc=0.0)
 
         order = self._client.get_order(order_id)
+        # Polymarket's /order endpoint occasionally returns a null body for an
+        # order ID that's still propagating (observed within ~500 ms of a post
+        # or between post+cancel). Treat as "no data yet" instead of crashing
+        # — the caller decides whether to trust the prior size_matched or not.
+        if not order:
+            return SettlementInfo(shares_held=0.0, cost_usdc=0.0)
         trade_ids = order.get("associate_trades") or []
 
         shares_held = 0.0
