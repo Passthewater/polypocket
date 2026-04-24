@@ -472,3 +472,57 @@ def test_log_snapshot_btc_path_none_stores_null():
     rows = get_snapshots_for_window(db_path, "slug-q")
     assert rows[0]["btc_path_json"] is None
     os.unlink(db_path)
+
+
+def test_log_book_sample_roundtrip():
+    import json
+
+    from polypocket.ledger import get_book_samples, log_book_sample
+
+    db_path = make_db()
+    log_book_sample(
+        db_path, "book-slug", sampled_at=1000.5,
+        up_bids=[{"price": 0.55, "size": 100.0}],
+        up_asks=[{"price": 0.56, "size": 100.0}],
+        down_bids=[{"price": 0.44, "size": 100.0}],
+        down_asks=[{"price": 0.45, "size": 100.0}],
+        btc_price=84250.0,
+    )
+    rows = get_book_samples(db_path, "book-slug")
+    assert len(rows) == 1
+    assert rows[0]["sampled_at"] == 1000.5
+    assert rows[0]["btc_price"] == 84250.0
+    assert json.loads(rows[0]["up_bids_json"]) == [{"price": 0.55, "size": 100.0}]
+    os.unlink(db_path)
+
+
+def test_log_order_event_roundtrip():
+    import json
+
+    from polypocket.ledger import get_order_events, log_order_event
+
+    db_path = make_db()
+    log_order_event(
+        db_path, trade_id=42, window_slug="w1",
+        event_type="submit", event_ts_wall=1000.0,
+        payload={"side": "up", "intended_size": 10.0},
+    )
+    rows = get_order_events(db_path, 42)
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == "submit"
+    assert rows[0]["external_order_id"] is None
+    assert json.loads(rows[0]["payload_json"]) == {"side": "up", "intended_size": 10.0}
+    os.unlink(db_path)
+
+
+def test_log_order_event_preserves_none_external_order_id():
+    from polypocket.ledger import get_order_events, log_order_event
+
+    db_path = make_db()
+    log_order_event(
+        db_path, trade_id=1, window_slug="w", event_type="submit",
+        event_ts_wall=1.0, payload={},
+    )
+    rows = get_order_events(db_path, 1)
+    assert rows[0]["external_order_id"] is None  # null, not empty string
+    os.unlink(db_path)
