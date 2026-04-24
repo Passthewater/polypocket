@@ -126,3 +126,40 @@ CLOB_API_KEY = os.getenv("CLOB_API_KEY", "").strip()
 CLOB_SECRET = os.getenv("CLOB_SECRET", "").strip()
 CLOB_PASSPHRASE = os.getenv("CLOB_PASSPHRASE", "").strip()
 PRIVATE_KEY = os.getenv("PRIVATE_KEY", "").strip()
+
+
+def snapshot_gate_config() -> dict:
+    """Return a plain-dict snapshot of TUI-mutable gate/sizing constants.
+
+    Read at call time via module globals so TUI keybind mutations (which
+    rebind the module attribute) are reflected. Serialize with json.dumps
+    at the call site. When adding a new tunable constant above, append
+    its name here in the same commit.
+    """
+    return {
+        "MIN_EDGE_THRESHOLD": MIN_EDGE_THRESHOLD,
+        "MIN_EDGE_THRESHOLD_DOWN": MIN_EDGE_THRESHOLD_DOWN,
+        "MAX_ENTRY_PRICE": MAX_ENTRY_PRICE,
+        "MAX_EDGE_THRESHOLD_UP": MAX_EDGE_THRESHOLD_UP,
+        "MIN_MODEL_CONFIDENCE": MIN_MODEL_CONFIDENCE,
+        "MIN_MODEL_CONFIDENCE_UP": MIN_MODEL_CONFIDENCE_UP,
+        "CALIBRATION_SHRINKAGE_UP": CALIBRATION_SHRINKAGE_UP,
+        "CALIBRATION_SHRINKAGE_DOWN": CALIBRATION_SHRINKAGE_DOWN,
+        "SIGNAL_CUSHION_TICKS": SIGNAL_CUSHION_TICKS,
+        "IOC_BUFFER_TICKS": IOC_BUFFER_TICKS,
+        "FOK_SLIPPAGE_TICKS": FOK_SLIPPAGE_TICKS,
+        "DEPTH_CLAMP_BUFFER": DEPTH_CLAMP_BUFFER,
+        "MIN_FILL_RATIO": MIN_FILL_RATIO,
+        "MAX_BOOK_AGE_S": MAX_BOOK_AGE_S,
+        "WINDOW_ENTRY_MIN_ELAPSED": WINDOW_ENTRY_MIN_ELAPSED,
+        "WINDOW_ENTRY_MIN_REMAINING": WINDOW_ENTRY_MIN_REMAINING,
+        "VOLATILITY_LOOKBACK": VOLATILITY_LOOKBACK,
+        "MIN_POSITION_USDC": MIN_POSITION_USDC,
+        "MAX_POSITION_USDC": MAX_POSITION_USDC,
+        "EDGE_FLOOR": EDGE_FLOOR,
+        "EDGE_RANGE": EDGE_RANGE,
+        "VOL_FLOOR": VOL_FLOOR,
+        "VOL_RANGE": VOL_RANGE,
+        "FEE_RATE": FEE_RATE,
+        "TRADING_MODE": TRADING_MODE,
+    }

@@ -79,3 +79,32 @@ def test_min_fill_ratio_env_override(monkeypatch):
     import importlib, polypocket.config as cfg
     importlib.reload(cfg)
     assert cfg.MIN_FILL_RATIO == 0.25
+
+
+def test_snapshot_gate_config_contains_all_named_constants():
+    from polypocket.config import snapshot_gate_config
+    snap = snapshot_gate_config()
+    for key in (
+        "MIN_EDGE_THRESHOLD", "MIN_EDGE_THRESHOLD_DOWN", "MAX_ENTRY_PRICE",
+        "MAX_EDGE_THRESHOLD_UP", "MIN_MODEL_CONFIDENCE", "MIN_MODEL_CONFIDENCE_UP",
+        "CALIBRATION_SHRINKAGE_UP", "CALIBRATION_SHRINKAGE_DOWN",
+        "SIGNAL_CUSHION_TICKS", "IOC_BUFFER_TICKS", "FOK_SLIPPAGE_TICKS",
+        "DEPTH_CLAMP_BUFFER", "MIN_FILL_RATIO", "MAX_BOOK_AGE_S",
+        "WINDOW_ENTRY_MIN_ELAPSED", "WINDOW_ENTRY_MIN_REMAINING", "VOLATILITY_LOOKBACK",
+        "MIN_POSITION_USDC", "MAX_POSITION_USDC",
+        "EDGE_FLOOR", "EDGE_RANGE", "VOL_FLOOR", "VOL_RANGE",
+        "FEE_RATE", "TRADING_MODE",
+    ):
+        assert key in snap, f"{key} missing from snapshot_gate_config()"
+
+
+def test_snapshot_gate_config_reflects_mutation():
+    """TUI keybinds mutate module attributes; snapshot must reflect current values."""
+    import polypocket.config as cfg
+    original = cfg.MIN_EDGE_THRESHOLD
+    try:
+        cfg.MIN_EDGE_THRESHOLD = 0.42
+        snap = cfg.snapshot_gate_config()
+        assert snap["MIN_EDGE_THRESHOLD"] == 0.42
+    finally:
+        cfg.MIN_EDGE_THRESHOLD = original

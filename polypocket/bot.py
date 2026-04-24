@@ -23,6 +23,7 @@ from polypocket.config import (
     VOL_RANGE,
     VOLATILITY_LOOKBACK,
     effective_ask,
+    snapshot_gate_config,
 )
 from polypocket.clients.polymarket import ioc_limit_price
 from polypocket.executor import (
@@ -157,6 +158,7 @@ class Bot:
                         stats=self._best_edge_snapshot,
                         trade_fired=False,
                         skip_reason=self._window_skip_reason or "no-edge",
+                        gate_config=snapshot_gate_config(),
                     )
 
                 # G1: close snapshot for every expiring window, regardless of
@@ -183,6 +185,7 @@ class Bot:
                     },
                     final_price=final_btc,
                     outcome=btc_outcome,
+                    gate_config=snapshot_gate_config(),
                 )
 
             if self._open_trade and self._current_window is not None:
@@ -387,6 +390,7 @@ class Bot:
                 snapshot_type="open",
                 stats=self.stats,
                 book_depth=book_depth,
+                gate_config=snapshot_gate_config(),
             )
 
         current_edge_abs = abs(self.stats.get("edge") or 0.0)
@@ -554,6 +558,7 @@ class Bot:
             stats=self.stats,
             book_depth=book_depth,
             trade_fired=True,
+            gate_config=snapshot_gate_config(),
         )
 
         if TRADING_MODE == "paper":

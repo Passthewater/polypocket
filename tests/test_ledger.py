@@ -423,3 +423,28 @@ def test_update_trade_writes_external_order_id_and_error():
     assert row["error"] == "no match"
     assert row["status"] == "rejected"
     os.unlink(db_path)
+
+
+def test_log_snapshot_persists_gate_config_json():
+    import json
+
+    db_path = make_db()
+    log_snapshot(
+        db_path, "slug-x", "decision",
+        stats={"btc_price": 100.0},
+        gate_config={"MIN_EDGE_THRESHOLD": 0.10, "MAX_ENTRY_PRICE": 0.70},
+    )
+    rows = get_snapshots_for_window(db_path, "slug-x")
+    assert rows[0]["gate_config_json"] is not None
+    loaded = json.loads(rows[0]["gate_config_json"])
+    assert loaded["MIN_EDGE_THRESHOLD"] == 0.10
+    assert loaded["MAX_ENTRY_PRICE"] == 0.70
+    os.unlink(db_path)
+
+
+def test_log_snapshot_gate_config_none_stores_null():
+    db_path = make_db()
+    log_snapshot(db_path, "slug-y", "open", stats={"btc_price": 100.0})
+    rows = get_snapshots_for_window(db_path, "slug-y")
+    assert rows[0]["gate_config_json"] is None
+    os.unlink(db_path)
