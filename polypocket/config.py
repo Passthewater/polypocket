@@ -8,6 +8,15 @@ load_dotenv(override=True)
 
 # --- Signal thresholds ---
 MIN_EDGE_THRESHOLD = 0.03
+# Ticks added to the pair-merge clearing price (1 - best_opp_bid) when
+# computing the edge gate. The gate uses the live-executable price, not the
+# snapshot ask — a BUY UP on a binary market clears via pair-merge against a
+# DOWN bid, so its real entry is (1 - best_down_bid), not up_ask. Separate
+# from IOC_BUFFER_TICKS, which is the taker's limit-price buffer for the
+# live order. Calibrated on n=78 post-fix fills (n=59 baseline + n=19 buffer=8
+# cohort, 2026-04-23): cohort median slip 6¢ at buffer=8 (vs 11.6¢ at
+# buffer=15). UP median 12.8¢, DOWN median 8.0¢ on baseline. See #11, #14.
+SIGNAL_CUSHION_TICKS = int(os.getenv("SIGNAL_CUSHION_TICKS", "6"))
 # Edge threshold checks run on the CALIBRATED probability (see shrinkage
 # factors below). DOWN threshold kept at 0.10 to remain close to sim_filters.py
 # option 11 (`down_shrink_0.30`) — less curve-fit than the in-sample PnL optimum
@@ -88,9 +97,9 @@ FOK_SLIPPAGE_TICKS = int(os.getenv("FOK_SLIPPAGE_TICKS", "3"))
 # IOC buffer added to the pair-merge clearing price. For a BUY UP, the
 # implied clearing price is `1 - best_down_bid`, and we post at that plus
 # this many ticks to absorb DOWN-book churn during the ~200–500 ms signing
-# window. Start 8 ticks (conservative; prior same-side FOK at 6 ticks still
-# killed on every reject, and the pair-merge limit is a different axis so
-# headroom is valuable for session 1). Tune via IOC_BUFFER_TICKS env var.
+# window. Reduced from 15 to 8 after the 2026-04-23 buffer=8 cohort (n=19
+# fills) produced median slip 6¢ vs 11.6¢ at buffer=15 — SHIP verdict per
+# design doc. See #14, closes #12.
 IOC_BUFFER_TICKS = int(os.getenv("IOC_BUFFER_TICKS", "8"))
 # Fraction of book depth (at <= FOK limit price) we ask for as our FOK
 # size. Leaves headroom for the book to thin between our depth read and
