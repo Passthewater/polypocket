@@ -854,6 +854,10 @@ async def test_bot_emits_close_snapshot_on_settlement(tmp_path: Path, monkeypatc
     # that triggers the transition + settlement of the previous window.
     monkeypatch.setattr(bot_module.time, "time", lambda: active_window.end_time + 1)
 
+    # Seed hires so the transition emitter can compute a BTC-derived outcome.
+    # 84250 > ptb 84198 → outcome "up".
+    bot.binance._hires.append((active_window.end_time, 84250.0))
+
     next_window = Window(
         condition_id="def456",
         question="BTC Up or Down",
@@ -869,9 +873,12 @@ async def test_bot_emits_close_snapshot_on_settlement(tmp_path: Path, monkeypatc
 
     snapshots = get_snapshots_for_window(str(db_path), "btc-updown-5m-snap-close")
     close = [s for s in snapshots if s["snapshot_type"] == "close"]
+    # Per design D2: transition emitter is the sole writer of the close row,
+    # outcome is BTC-derived (not PM-resolved), trade_fired is not set.
     assert len(close) == 1
     assert close[0]["outcome"] == "up"
-    assert close[0]["trade_fired"] == 1
+    assert close[0]["final_price"] == 84250.0
+    assert close[0]["trade_fired"] is None
 
 
 @pytest.mark.asyncio
@@ -971,6 +978,9 @@ async def test_full_window_lifecycle_produces_three_snapshots(tmp_path: Path, mo
     # seen as a post-expiry transition (matches production timing).
     monkeypatch.setattr(bot_module.time, "time", lambda: w1.end_time + 1)
 
+    # Seed hires so the G1 transition emitter can BTC-derive an "up" outcome.
+    bot.binance._hires.append((w1.end_time, 84250.0))
+
     # Window 2: triggers settlement of window 1
     w2 = Window(
         condition_id="w2",
@@ -994,9 +1004,10 @@ async def test_full_window_lifecycle_produces_three_snapshots(tmp_path: Path, mo
     decision = next(s for s in snapshots if s["snapshot_type"] == "decision")
     assert decision["trade_fired"] == 1
 
-    # Verify close has outcome
+    # G1: close outcome is BTC-derived (84250 > ptb 84198 → "up").
     close = next(s for s in snapshots if s["snapshot_type"] == "close")
     assert close["outcome"] == "up"
+    assert close["final_price"] == 84250.0
 
 
 @pytest.mark.asyncio
@@ -1561,3 +1572,184 @@ async def test_bot_passes_pair_merge_limit_price_to_submit(tmp_path: Path, monke
     # limit_price = 1 - 0.60 + IOC_BUFFER_TICKS*0.01
     expected = round(min(0.99, (1.0 - 0.60) + IOC_BUFFER_TICKS * 0.01), 2)
     assert client.calls[0]["limit_price"] == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 (G1): universal close-snapshot emitter
+# ---------------------------------------------------------------------------
+
+
+def _seed_hires(bot, ts: float, price: float) -> None:
+    """Seed the binance hires buffer so price_at(ts) returns `price`."""
+    bot.binance._hires.append((ts, price))
+    bot.binance._hires_last_ts = ts
+    bot.binance.latest_price = price
+
+
+def _make_window(condition_id: str, slug: str, end_time: float, ptb: float) -> Window:
+    return Window(
+        condition_id=condition_id,
+        question="BTC Up or Down",
+        up_token_id="UP",
+        down_token_id="DOWN",
+        end_time=end_time,
+        slug=slug,
+        price_to_beat=ptb,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+
+@pytest.mark.asyncio
+async def test_phase1_close_emitted_for_non_traded_window(tmp_path: Path):
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "p1.db"
+    init_db(str(db_path))
+    bot = Bot(db_path=str(db_path))
+    bot.signal_engine.evaluate = lambda **kwargs: None  # no trade
+
+    now = time.time()
+    window_a = _make_window("A", "win-a", end_time=now - 1, ptb=100.0)
+    window_b = _make_window("B", "win-b", end_time=now + 300, ptb=101.0)
+
+    _seed_hires(bot, ts=window_a.end_time, price=105.0)
+    await bot._on_book_update(window_a, "up")
+    await bot._on_book_update(window_b, "up")
+
+    rows = [r for r in get_snapshots_for_window(str(db_path), "win-a") if r["snapshot_type"] == "close"]
+    assert len(rows) == 1
+    assert rows[0]["final_price"] == 105.0
+    assert rows[0]["outcome"] == "up"
+
+
+@pytest.mark.asyncio
+async def test_phase1_close_emitted_for_traded_window_only_once(tmp_path: Path, monkeypatch):
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "paper")
+    db_path = tmp_path / "p1.db"
+    init_db(str(db_path))
+    bot = Bot(db_path=str(db_path))
+    bot.signal_engine.evaluate = lambda **kwargs: Signal(
+        side="up", model_p_up=0.75, market_price=0.55, edge=0.20,
+        up_edge=0.20, down_edge=-0.20,
+    )
+    bot.risk.check = lambda: (True, "")
+    monkeypatch.setattr(
+        "polypocket.bot.execute_paper_trade",
+        Mock(return_value=TradeResult(success=True, trade_id=1, pnl=None)),
+    )
+
+    async def _no_resolution(_slug):  # park the trade in pending rather than settling
+        return None
+
+    monkeypatch.setattr(bot_module, "fetch_resolution", _no_resolution)
+
+    now = time.time()
+    window_a = _make_window("A", "win-a", end_time=now + 120, ptb=100.0)
+    window_b = _make_window("B", "win-b", end_time=now + 420, ptb=101.0)
+
+    _seed_hires(bot, ts=window_a.end_time, price=95.0)
+    await bot._on_book_update(window_a, "up")  # fires trade
+
+    # Advance time past window A's end so window B's incoming-live check passes
+    # and the transition block fires.
+    monkeypatch.setattr(bot_module.time, "time", lambda: window_a.end_time + 1)
+    await bot._on_book_update(window_b, "up")
+
+    rows = [r for r in get_snapshots_for_window(str(db_path), "win-a") if r["snapshot_type"] == "close"]
+    assert len(rows) == 1  # exactly one close row, not two
+    assert rows[0]["final_price"] == 95.0
+    assert rows[0]["outcome"] == "down"
+
+
+@pytest.mark.asyncio
+async def test_phase1_close_written_with_nulls_when_hires_empty(tmp_path: Path):
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "p1.db"
+    init_db(str(db_path))
+    bot = Bot(db_path=str(db_path))
+    bot.signal_engine.evaluate = lambda **kwargs: None
+    bot.binance.latest_price = 100.0  # needed to pass the latest_price guard
+
+    now = time.time()
+    window_a = _make_window("A", "win-a", end_time=now - 1, ptb=100.0)
+    window_b = _make_window("B", "win-b", end_time=now + 300, ptb=101.0)
+
+    # no _seed_hires — price_at returns None
+    await bot._on_book_update(window_a, "up")
+    await bot._on_book_update(window_b, "up")
+
+    rows = [r for r in get_snapshots_for_window(str(db_path), "win-a") if r["snapshot_type"] == "close"]
+    assert len(rows) == 1
+    assert rows[0]["final_price"] is None
+    assert rows[0]["outcome"] is None
+
+
+@pytest.mark.asyncio
+async def test_phase1_tie_yields_null_outcome(tmp_path: Path):
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "p1.db"
+    init_db(str(db_path))
+    bot = Bot(db_path=str(db_path))
+    bot.signal_engine.evaluate = lambda **kwargs: None
+
+    now = time.time()
+    window_a = _make_window("A", "win-a", end_time=now - 1, ptb=100.0)
+    window_b = _make_window("B", "win-b", end_time=now + 300, ptb=101.0)
+
+    _seed_hires(bot, ts=window_a.end_time, price=100.0)  # exact tie
+    await bot._on_book_update(window_a, "up")
+    await bot._on_book_update(window_b, "up")
+
+    rows = [r for r in get_snapshots_for_window(str(db_path), "win-a") if r["snapshot_type"] == "close"]
+    assert len(rows) == 1
+    assert rows[0]["final_price"] == 100.0
+    assert rows[0]["outcome"] is None
+
+
+@pytest.mark.asyncio
+async def test_phase1_settle_does_not_write_close(tmp_path: Path, monkeypatch):
+    """After a paper trade settles, the only close row is the transition one."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "paper")
+    db_path = tmp_path / "p1.db"
+    init_db(str(db_path))
+    bot = Bot(db_path=str(db_path))
+    bot.signal_engine.evaluate = lambda **kwargs: Signal(
+        side="up", model_p_up=0.75, market_price=0.55, edge=0.20,
+        up_edge=0.20, down_edge=-0.20,
+    )
+    bot.risk.check = lambda: (True, "")
+    monkeypatch.setattr(
+        "polypocket.bot.execute_paper_trade",
+        Mock(return_value=TradeResult(success=True, trade_id=1, pnl=None)),
+    )
+    monkeypatch.setattr("polypocket.bot.settle_paper_trade", lambda *a, **kw: 4.5)
+
+    async def _resolution_up(_slug):
+        return "up"
+
+    monkeypatch.setattr(bot_module, "fetch_resolution", _resolution_up)
+
+    now = time.time()
+    window_a = _make_window("A", "win-a", end_time=now + 120, ptb=100.0)
+    window_b = _make_window("B", "win-b", end_time=now + 420, ptb=101.0)
+
+    _seed_hires(bot, ts=window_a.end_time, price=105.0)
+    await bot._on_book_update(window_a, "up")  # fires trade
+
+    # Advance time past window A's end — next call hits the expired-window
+    # settle branch (which must NOT write close) and then the transition
+    # into window B (which DOES write the single close row).
+    monkeypatch.setattr(bot_module.time, "time", lambda: window_a.end_time + 1)
+    await bot._on_book_update(window_b, "up")
+
+    rows = [r for r in get_snapshots_for_window(str(db_path), "win-a") if r["snapshot_type"] == "close"]
+    assert len(rows) == 1

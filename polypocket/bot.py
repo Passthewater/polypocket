@@ -147,7 +147,8 @@ class Bot:
         ):
             # Flush previous window's skip decision snapshot before settling/resetting
             if self._current_window is not None:
-                prev_slug = self._current_window.slug
+                prev_window = self._current_window
+                prev_slug = prev_window.slug
                 if not self._window_traded and self._best_edge_snapshot is not None:
                     log_snapshot(
                         self.db_path,
@@ -157,6 +158,32 @@ class Bot:
                         trade_fired=False,
                         skip_reason=self._window_skip_reason or "no-edge",
                     )
+
+                # G1: close snapshot for every expiring window, regardless of
+                # trade. Written unconditionally — if the hires buffer didn't
+                # reach end_time, the row still lands with NULL final_price /
+                # outcome. A null final_price is a legitimate "bot couldn't
+                # observe the close" signal, more useful than a missing row
+                # indistinguishable from "window never existed."
+                prev_ptb = prev_window.price_to_beat
+                final_btc = self.binance.price_at(prev_window.end_time)
+                btc_outcome: str | None = None
+                if final_btc is not None and prev_ptb is not None:
+                    if final_btc > prev_ptb:
+                        btc_outcome = "up"
+                    elif final_btc < prev_ptb:
+                        btc_outcome = "down"
+                log_snapshot(
+                    self.db_path,
+                    window_slug=prev_slug,
+                    snapshot_type="close",
+                    stats={
+                        "btc_price": final_btc,
+                        "window_open_price": prev_ptb,
+                    },
+                    final_price=final_btc,
+                    outcome=btc_outcome,
+                )
 
             if self._open_trade and self._current_window is not None:
                 await self._settle_previous_window(self._current_window)
@@ -673,14 +700,9 @@ class Bot:
             else:
                 self.risk.record_loss()
             log.info("SETTLED: %s -> P&L $%.2f", outcome.upper(), pnl)
-        log_snapshot(
-            self.db_path,
-            window_slug=self._current_window.slug if self._current_window else "unknown",
-            snapshot_type="close",
-            stats=self.stats,
-            trade_fired=True,
-            outcome=outcome,
-        )
+        # G1/D2: the window-transition emitter is the sole writer of the close
+        # row. Settle no longer writes here; PM-resolved outcome lives on the
+        # `trades` row via settle_*_trade.
         self._open_trade = None
         self.stats["position"] = None
         if self.on_trade:
@@ -756,14 +778,7 @@ class Bot:
                     else:
                         self.risk.record_loss()
                     log.info("SETTLED pending: %s -> P&L $%.2f", outcome.upper(), pnl)
-                log_snapshot(
-                    self.db_path,
-                    window_slug=trade["window_slug"],
-                    snapshot_type="close",
-                    stats=self.stats,
-                    trade_fired=True,
-                    outcome=outcome,
-                )
+                # G1/D2: transition emitter owns the close row; settle does not write here.
                 if self.on_trade:
                     self.on_trade(
                         TradeResult(success=True, trade_id=trade["trade_id"], pnl=pnl),
