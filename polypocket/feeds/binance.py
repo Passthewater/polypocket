@@ -58,6 +58,10 @@ class BinanceFeed:
             return None
         return best_price
 
+    def get_path(self, start_ts: float, end_ts: float) -> list[tuple[float, float]]:
+        """Return 1-Hz (ts, price) samples from the hires buffer within [start_ts, end_ts]."""
+        return [(ts, p) for ts, p in self._hires if start_ts <= ts <= end_ts]
+
     def get_5min_returns(self) -> list[float]:
         if len(self.prices) < 2:
             return []

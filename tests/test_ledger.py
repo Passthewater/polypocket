@@ -448,3 +448,27 @@ def test_log_snapshot_gate_config_none_stores_null():
     rows = get_snapshots_for_window(db_path, "slug-y")
     assert rows[0]["gate_config_json"] is None
     os.unlink(db_path)
+
+
+def test_log_snapshot_persists_btc_path_json():
+    import json
+
+    db_path = make_db()
+    log_snapshot(
+        db_path, "slug-p", "decision",
+        stats={"btc_price": 100.0},
+        btc_path=[(1000.0, 100.0), (1001.0, 100.5), (1002.0, 101.0)],
+    )
+    rows = get_snapshots_for_window(db_path, "slug-p")
+    path = json.loads(rows[0]["btc_path_json"])
+    # json preserves tuples as lists — compare structurally.
+    assert path == [[1000.0, 100.0], [1001.0, 100.5], [1002.0, 101.0]]
+    os.unlink(db_path)
+
+
+def test_log_snapshot_btc_path_none_stores_null():
+    db_path = make_db()
+    log_snapshot(db_path, "slug-q", "open", stats={"btc_price": 100.0})
+    rows = get_snapshots_for_window(db_path, "slug-q")
+    assert rows[0]["btc_path_json"] is None
+    os.unlink(db_path)
