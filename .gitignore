@@ -12,3 +12,6 @@ observations.csv
 reports/
 .cohort_start
 .cohort_stop
+_bmad/
+corpus.parquet
+corpus*.parquet
