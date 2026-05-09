@@ -67,10 +67,36 @@ def test_join_respects_since_timestamp_cutoff():
     _insert_decision(c, "post", "2026-04-25 00:00:00", fired=0)
     _insert_close(c, "post", "2026-04-25 00:05:00", outcome="down", fired=0)
 
-    rows = join_decision_close(c, source="paper", since_timestamp="2026-04-24T00:00:00")
+    rows = join_decision_close(c, source="paper", since_timestamp="2026-04-24 00:00:00")
 
     assert [r.window_slug for r in rows] == ["post"]
     assert rows[0].outcome_int == 0
+
+
+def test_cutoff_includes_same_day_post_midnight_rows():
+    """Regression: SQLite stores `timestamp` as 'YYYY-MM-DD HH:MM:SS' (space).
+    A 'T'-separated cutoff lexicographically exceeds every space-separated row
+    on the same date and silently drops a day of training data. The default
+    DEFAULT_SINCE must therefore use the space separator, and a same-day row
+    must be included by a midnight-of-that-day cutoff.
+    """
+    c = _make_db()
+    _insert_decision(c, "same_day_morning", "2026-04-24 14:25:00")
+    _insert_close(c, "same_day_morning", "2026-04-24 14:30:00", outcome="up")
+
+    rows = join_decision_close(c, source="paper", since_timestamp="2026-04-24 00:00:00")
+
+    assert [r.window_slug for r in rows] == ["same_day_morning"]
+
+
+def test_default_since_matches_sqlite_timestamp_format():
+    """Guard against re-introducing the 'T' separator in DEFAULT_SINCE."""
+    from scripts.export_training_corpus import DEFAULT_SINCE
+
+    assert "T" not in DEFAULT_SINCE, (
+        f"DEFAULT_SINCE={DEFAULT_SINCE!r} must use a space separator to match "
+        "SQLite's CURRENT_TIMESTAMP format ('YYYY-MM-DD HH:MM:SS')."
+    )
 
 
 def test_join_drops_unlabeled_decision():
