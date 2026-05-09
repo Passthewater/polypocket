@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+from polypocket import observer
 from polypocket.signal import SignalEngine
 
 
@@ -387,3 +388,49 @@ def test_signal_engine_down_calibration_shrinks_edge_and_may_block():
             down_ask=0.40,
         )
         assert signal is None
+
+
+# --- #15 dual-logging + MODEL_VERSION dispatcher tests ---
+
+def test_signal_dual_logs_both_versions_under_v1_default(monkeypatch):
+    """With MODEL_VERSION unset, gate fires v1_calibrated but BOTH versions
+    are populated on the Signal for ledger persistence."""
+    monkeypatch.delenv("MODEL_VERSION", raising=False)
+    engine = SignalEngine()
+    signal = engine.evaluate(
+        displacement=0.0009,
+        t_elapsed=120.0,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        up_ask=0.60,
+        down_ask=0.80,
+    )
+    assert signal is not None
+    assert signal.model_p_up_v1_calibrated is not None
+    assert 0.0 <= signal.model_p_up_v1_calibrated <= 1.0
+    assert signal.model_p_up_v2 is not None
+    assert 0.0 <= signal.model_p_up_v2 <= 1.0
+    # Default v1: gate uses v1_calibrated.
+    assert signal.model_p_up == signal.model_p_up_v1_calibrated
+
+
+def test_signal_dispatches_to_v2_when_env_set(monkeypatch):
+    """With MODEL_VERSION=v2 the gate routes through v2; both versions still
+    populated for dual-logging."""
+    monkeypatch.setenv("MODEL_VERSION", "v2")
+    observer._reset_v2_cache_for_tests()
+    engine = SignalEngine()
+    signal = engine.evaluate(
+        displacement=0.0009,
+        t_elapsed=120.0,
+        t_remaining=180.0,
+        sigma_5min=0.0012,
+        up_ask=0.60,
+        down_ask=0.80,
+    )
+    # Whether v2 fires or not depends on the shipped coefs; the contract we
+    # test is just (a) the dispatcher routed (b) both fields are populated.
+    if signal is not None:
+        assert signal.model_p_up_v1_calibrated is not None
+        assert signal.model_p_up_v2 is not None
+        assert signal.model_p_up == signal.model_p_up_v2

@@ -50,7 +50,12 @@ from polypocket.ledger import (
     log_book_sample,
     log_snapshot,
 )
-from polypocket.observer import calibrate_p_up, compute_model_p_up, compute_realized_vol
+from polypocket.observer import (
+    calibrate_p_up,
+    compute_model_p_up,
+    compute_model_p_up_v2,
+    compute_realized_vol,
+)
 from polypocket.quotes import QuoteSnapshot, validate_quote
 from polypocket.risk import RiskManager
 from polypocket.signal import SignalEngine
@@ -368,6 +373,20 @@ class Bot:
             up_factor=CALIBRATION_SHRINKAGE_UP,
             down_factor=CALIBRATION_SHRINKAGE_DOWN,
         )
+        # #15 dual-logging: compute v2 unconditionally for ledger persistence,
+        # independent of which version the signal engine routes to fire.
+        # v2 needs both asks; if either is missing fall back to None and let
+        # log_snapshot persist a NULL.
+        if window.up_ask is not None and window.down_ask is not None:
+            model_p_up_v2 = compute_model_p_up_v2(
+                displacement=displacement,
+                t_remaining=max(t_remaining, 0),
+                sigma_5min=sigma,
+                up_ask=window.up_ask,
+                down_ask=window.down_ask,
+            )
+        else:
+            model_p_up_v2 = None
         up_edge = None if window.up_ask is None else model_p_up_cal - effective_ask(window.up_ask)
         down_edge = None if window.down_ask is None else (1 - model_p_up_cal) - effective_ask(window.down_ask)
         preview_edge = None
@@ -394,6 +413,8 @@ class Bot:
                 "displacement": displacement,
                 "model_p_up": model_p_up,
                 "model_p_up_calibrated": model_p_up_cal,
+                "model_p_up_v1_calibrated": model_p_up_cal,
+                "model_p_up_v2": model_p_up_v2,
                 "market_p_up": window.up_ask,
                 "edge": preview_edge,
                 "preview_side": preview_side,
