@@ -9,7 +9,8 @@ import ccxt.pro as ccxtpro
 log = logging.getLogger(__name__)
 
 SNAPSHOT_INTERVAL_S = 300
-# High-res buffer: one sample per second, last 10 minutes
+# High-res buffer: at most one sample per second (gated by Binance trade event
+# rate — typically 1–4s in quiet markets); last 10 minutes
 HIRES_INTERVAL_S = 1.0
 HIRES_MAX_AGE_S = 600.0
 

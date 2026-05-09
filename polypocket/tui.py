@@ -253,3 +253,7 @@ class PolypocketApp(App):
         self.query_one("#log", RichLog).write(
             f"Current max daily loss: ${MAX_DAILY_LOSS:.2f}."
         )
+
+
+if __name__ == "__main__":
+    PolypocketApp().run()
