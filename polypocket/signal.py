@@ -1,5 +1,6 @@
 """Signal engine: evaluate edge and produce trading signals."""
 
+import os
 from dataclasses import dataclass
 
 from polypocket.config import (
@@ -34,7 +35,7 @@ def _effective_entry(
         return ask
     best_opp = max(float(b["price"]) for b in opp_bids)
     return min(0.99, (1.0 - best_opp) + SIGNAL_CUSHION_TICKS * 0.01)
-from polypocket.observer import calibrate_p_up, compute_model_p_up
+from polypocket.observer import calibrate_p_up, compute_model_p_up, compute_model_p_up_v2
 
 
 @dataclass
@@ -46,6 +47,10 @@ class Signal:
     up_edge: float
     down_edge: float
     model_p_up_raw: float | None = None
+    # #15 dual-logging: both versions computed on every evaluate, persisted via
+    # log_snapshot regardless of which one drove the gate.
+    model_p_up_v1_calibrated: float | None = None
+    model_p_up_v2: float | None = None
 
 
 class SignalEngine:
@@ -74,12 +79,27 @@ class SignalEngine:
         if sigma_5min <= 0:
             return None
 
+        # Both versions are computed unconditionally so dual-logging captures
+        # them regardless of which one drives the gate (#15).
         model_p_up_raw = compute_model_p_up(displacement, t_remaining, sigma_5min)
-        model_p_up = calibrate_p_up(
+        model_p_up_v1_calibrated = calibrate_p_up(
             model_p_up_raw,
             up_factor=CALIBRATION_SHRINKAGE_UP,
             down_factor=CALIBRATION_SHRINKAGE_DOWN,
         )
+        model_p_up_v2 = compute_model_p_up_v2(
+            displacement=displacement,
+            t_remaining=t_remaining,
+            sigma_5min=sigma_5min,
+            up_ask=up_ask,
+            down_ask=down_ask,
+        )
+
+        # Single switch: MODEL_VERSION=v2 -> v2 fires, else v1_calibrated fires.
+        if os.environ.get("MODEL_VERSION", "v1").strip().lower() == "v2":
+            model_p_up = model_p_up_v2
+        else:
+            model_p_up = model_p_up_v1_calibrated
         # Live-executable entry: pair-merge clearing price when bids known,
         # snapshot ask otherwise. A BUY UP clears at (1 - best_down_bid), which
         # is typically higher than up_ask — using up_ask here inflates edge.
@@ -113,6 +133,8 @@ class SignalEngine:
                 edge=up_edge,
                 up_edge=up_edge,
                 down_edge=down_edge,
+                model_p_up_v1_calibrated=model_p_up_v1_calibrated,
+                model_p_up_v2=model_p_up_v2,
             )
         if down_aligned and down_price_ok and down_edge >= MIN_EDGE_THRESHOLD_DOWN:
             return Signal(
@@ -123,5 +145,7 @@ class SignalEngine:
                 edge=down_edge,
                 up_edge=up_edge,
                 down_edge=down_edge,
+                model_p_up_v1_calibrated=model_p_up_v1_calibrated,
+                model_p_up_v2=model_p_up_v2,
             )
         return None

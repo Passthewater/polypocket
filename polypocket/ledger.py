@@ -118,6 +118,12 @@ def init_db(db_path: str) -> None:
             # G3: persist raw 1Hz BTC path per decision/close.
             if "btc_path_json" not in snap_cols:
                 conn.execute("ALTER TABLE window_snapshots ADD COLUMN btc_path_json TEXT")
+            # #15 dual-logging: persist v1-calibrated and v2 probability on every
+            # decision row regardless of which version drives the trade gate.
+            if "model_p_up_v1_calibrated" not in snap_cols:
+                conn.execute("ALTER TABLE window_snapshots ADD COLUMN model_p_up_v1_calibrated REAL")
+            if "model_p_up_v2" not in snap_cols:
+                conn.execute("ALTER TABLE window_snapshots ADD COLUMN model_p_up_v2 REAL")
 
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_snapshots_window ON window_snapshots(window_slug)"
@@ -439,8 +445,9 @@ def log_snapshot(
                 up_bids_json, down_bids_json,
                 trade_fired, skip_reason,
                 outcome, final_price,
-                gate_config_json, btc_path_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                gate_config_json, btc_path_json,
+                model_p_up_v1_calibrated, model_p_up_v2
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 window_slug,
@@ -468,6 +475,8 @@ def log_snapshot(
                 final_price,
                 gate_config_json,
                 btc_path_json,
+                stats.get("model_p_up_v1_calibrated"),
+                stats.get("model_p_up_v2"),
             ),
         )
         conn.commit()
