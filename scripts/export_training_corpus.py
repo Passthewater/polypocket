@@ -35,7 +35,11 @@ CORE_FIELDS = (
 
 # G1 commit (5f76bea) merged 2026-04-24; before that, close rows were only
 # emitted on trade_fired=1 windows, so labels are non-representative.
-DEFAULT_SINCE = "2026-04-24T00:00:00"
+# NB: SQLite stores `window_snapshots.timestamp` as 'YYYY-MM-DD HH:MM:SS'
+# (space separator). The cutoff MUST use the same separator -- a 'T' would
+# lexicographically exceed every space-separated row from the same date and
+# silently drop a day of training data.
+DEFAULT_SINCE = "2026-04-24 00:00:00"
 
 
 @dataclass(frozen=True)
