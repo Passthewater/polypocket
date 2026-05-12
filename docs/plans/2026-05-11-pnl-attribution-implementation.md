@@ -1255,7 +1255,9 @@ git commit -m "feat(attribution): persist signal_reference_price live + backfill
 
 ### Step 1: Add Section 7 to `generate_report`
 
-In `polypocket/analyze.py`, after the existing reliability section, add:
+In `polypocket/analyze.py`, insert the new Section 7 right before the existing "Raw Snapshot Data" section, and renumber the existing 7 → 8 and 8 → 9 (Claude Analysis Prompt). The plan originally described this as "after the existing reliability section"; in practice the report file already had sections labelled 7 and 8 for debug content, so the insertion point that preserves the plan's "Section 7 = PnL Attribution" label is just before that debug block. The two debug sections naturally remain at the end of the report.
+
+Insert:
 
 ```python
     # ================================================================

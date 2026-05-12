@@ -247,6 +247,8 @@ def execute_paper_trade(
             outcome=outcome,
             pnl=pnl,
             status=status,
+            signal_reference_price=signal.signal_reference_price,
+            signal_reference_source="live",
         )
     except sqlite3.IntegrityError:
         consumed = _window_consumed_result(db_path, window_slug)
@@ -317,6 +319,8 @@ def execute_live_trade(
             outcome=None,
             pnl=None,
             status="reserved",
+            signal_reference_price=signal.signal_reference_price,
+            signal_reference_source="live",
         )
     except sqlite3.IntegrityError:
         consumed = _window_consumed_result(db_path, window_slug)

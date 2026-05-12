@@ -51,6 +51,10 @@ class Signal:
     # log_snapshot regardless of which one drove the gate.
     model_p_up_v1_calibrated: float | None = None
     model_p_up_v2: float | None = None
+    # PnL-attribution: the live-executable entry the gate compared model_p_up
+    # against (pair-merge clearing when bids available, else snapshot ask).
+    # Side-aligned: up_entry on UP signals, down_entry on DOWN signals.
+    signal_reference_price: float | None = None
 
 
 class SignalEngine:
@@ -135,6 +139,7 @@ class SignalEngine:
                 down_edge=down_edge,
                 model_p_up_v1_calibrated=model_p_up_v1_calibrated,
                 model_p_up_v2=model_p_up_v2,
+                signal_reference_price=up_entry,
             )
         if down_aligned and down_price_ok and down_edge >= MIN_EDGE_THRESHOLD_DOWN:
             return Signal(
@@ -147,5 +152,6 @@ class SignalEngine:
                 down_edge=down_edge,
                 model_p_up_v1_calibrated=model_p_up_v1_calibrated,
                 model_p_up_v2=model_p_up_v2,
+                signal_reference_price=down_entry,
             )
         return None

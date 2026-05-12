@@ -104,7 +104,8 @@ class TradesPanel(Static):
         if not trades:
             lines.append("  No trades yet")
         for trade in trades:
-            timestamp = trade["timestamp"][:8] if trade["timestamp"] else ""
+            # "2026-05-12 00:52:51" -> "05-12 00:52"
+            timestamp = trade["timestamp"][5:16] if trade["timestamp"] else ""
             side = trade["side"].upper()
             status = trade["status"]
             pnl = trade["pnl"]
@@ -113,12 +114,60 @@ class TradesPanel(Static):
             if pnl is not None:
                 outcome = "Won" if pnl > 0 else "Lost"
                 pnl_str = f"${pnl:+.2f}"
-                model_str = f"model {model:.0%}" if model else ""
-                market_str = f"mkt {market:.0%}" if market else ""
+                model_str = f"model {model:.0%}" if model is not None else ""
+                market_str = f"mkt {market:.0%}" if market is not None else ""
                 lines.append(f"  {timestamp} {side:4s} {outcome} {pnl_str}  ({model_str} / {market_str})")
             else:
                 lines.append(f"  {timestamp} {side:4s} {status}")
         self.update("\n".join(lines))
+
+
+def render_attribution_text(db_path: str) -> str:
+    """Pure function: read settled trades, render the TUI panel body as text.
+
+    Factored out of AttributionPanel so it can be unit-tested without
+    instantiating textual widgets.
+    """
+    import sqlite3
+    from contextlib import closing
+    from polypocket.attribution import aggregate_attribution, attach_v2_cohort
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        all_settled = [dict(r) for r in conn.execute(
+            "SELECT * FROM trades WHERE status='settled' ORDER BY id"
+        ).fetchall()]
+
+    # Join model_p_up_v2 so the v1/v2 cohort line reflects reality.
+    all_settled = attach_v2_cohort(all_settled, db_path)
+    last20 = all_settled[-20:]
+    agg_life = aggregate_attribution(all_settled)
+    agg_20 = aggregate_attribution(last20)
+
+    def fmt(a):
+        return (f"R ${a.realized_pnl:+7.2f}  "
+                f"E ${a.edge_sum:+7.2f}  "
+                f"S ${a.slip_sum:+7.2f}  "
+                f"F ${a.expected_fee_sum:+7.2f}  "
+                f"L ${a.luck_sum:+7.2f}")
+
+    lines = ["[bold]PNL ATTRIBUTION (exact/live only)[/bold]", ""]
+    lines.append(f"Lifetime (n={agg_life.n_total}):")
+    lines.append(f"  {fmt(agg_life)}")
+    lines.append("")
+    lines.append(f"Last 20 (n={agg_20.n_total}):")
+    lines.append(f"  {fmt(agg_20)}")
+    lines.append("")
+    lines.append(f"Provenance: exact/live={agg_life.n_exact} "
+                 f"approx={agg_life.n_approximate} missing={agg_life.n_missing} "
+                 f"unattributable={agg_life.n_unattributable}")
+    lines.append(f"Cohort: v1={agg_life.n_v1_attributed} v2={agg_life.n_v2_attributed}")
+    return "\n".join(lines)
+
+
+class AttributionPanel(Static):
+    def update_attribution(self, db_path: str) -> None:
+        self.update(render_attribution_text(db_path))
 
 
 class StatsBar(Static):
@@ -139,6 +188,7 @@ class PolypocketApp(App):
     #status { width: 1fr; }
     #window { width: 1fr; }
     #trades { height: 12; }
+    #attribution { height: 9; }
     #stats-bar { height: 3; }
     #log { height: 1fr; }
     """
@@ -165,6 +215,7 @@ class PolypocketApp(App):
             id="top",
         )
         yield TradesPanel(id="trades")
+        yield AttributionPanel(id="attribution")
         yield StatsBar(id="stats-bar")
         # markup=False: log lines may contain user-controlled strings (CLOB
         # error payloads like "{'error': 'invalid fee rate (0), ...}") that
@@ -215,6 +266,7 @@ class PolypocketApp(App):
             self.query_one("#status", StatusPanel).update_stats(self.bot.stats, self.bot.db_path)
             self.query_one("#window", WindowPanel).update_stats(self.bot.stats)
             self.query_one("#trades", TradesPanel).update_trades(self.bot.db_path)
+            self.query_one("#attribution", AttributionPanel).update_attribution(self.bot.db_path)
             self.query_one("#stats-bar", StatsBar).update_stats(self.bot.db_path)
         except Exception as exc:
             log.error("Panel refresh error: %s", exc)

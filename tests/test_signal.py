@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+import pytest
+
 from polypocket import observer
 from polypocket.signal import SignalEngine
 
@@ -434,3 +436,51 @@ def test_signal_dispatches_to_v2_when_env_set(monkeypatch):
         assert signal.model_p_up_v1_calibrated is not None
         assert signal.model_p_up_v2 is not None
         assert signal.model_p_up == signal.model_p_up_v2
+
+
+def test_signal_populates_signal_reference_price_for_up_side():
+    """For a UP signal, signal_reference_price equals up_entry = (1 - best_down_bid) + cushion.
+
+    Inputs mirror tests/test_signal.py's existing UP-firing recipe (displacement
+    ~1z over a 3min residual) so up_edge lands in the [MIN_EDGE_THRESHOLD,
+    MAX_EDGE_THRESHOLD_UP) firing band (config.py:10, :36). Picking larger
+    displacements pushes model_p_up past 0.99 and trips MAX_EDGE_THRESHOLD_UP.
+    """
+    from polypocket.signal import SignalEngine
+    from polypocket.config import SIGNAL_CUSHION_TICKS
+
+    eng = SignalEngine()
+    sig = eng.evaluate(
+        displacement=0.0009, t_elapsed=120, t_remaining=180, sigma_5min=0.0012,
+        up_ask=0.58, down_ask=0.50,
+        up_bids=[{"price": 0.40}],
+        down_bids=[{"price": 0.42}],
+    )
+    assert sig is not None
+    assert sig.side == "up"
+    expected = (1.0 - 0.42) + SIGNAL_CUSHION_TICKS * 0.01
+    assert sig.signal_reference_price == pytest.approx(expected, abs=1e-9)
+
+
+def test_signal_populates_signal_reference_price_for_down_side():
+    """For a DOWN signal, signal_reference_price = (1 - best_up_bid) + cushion.
+
+    DOWN side needs a higher best_up_bid (lowering down_entry below
+    effective_ask + MIN_EDGE_THRESHOLD_DOWN) AND CALIBRATION_SHRINKAGE_DOWN=0.50
+    is applied (config.py:50). The combination forces tighter inputs than UP.
+    """
+    from polypocket.signal import SignalEngine
+    from polypocket.config import SIGNAL_CUSHION_TICKS
+
+    eng = SignalEngine()
+    sig = eng.evaluate(
+        displacement=-0.0009, t_elapsed=120, t_remaining=180, sigma_5min=0.0012,
+        up_ask=0.50, down_ask=0.50,
+        up_bids=[{"price": 0.55}],   # high up_bid -> low down_entry
+        down_bids=[{"price": 0.40}],
+    )
+    assert sig is not None
+    assert sig.side == "down"
+    # DOWN side's reference is (1 - best_up_bid) + cushion, NOT (1 - best_down_bid).
+    expected = (1.0 - 0.55) + SIGNAL_CUSHION_TICKS * 0.01
+    assert sig.signal_reference_price == pytest.approx(expected, abs=1e-9)
