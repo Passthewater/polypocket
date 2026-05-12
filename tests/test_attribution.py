@@ -278,3 +278,30 @@ def test_attach_v2_cohort_joins_decision_snapshot(tmp_path):
     joined = attach_v2_cohort(rows, db)
     assert joined[0]["model_p_up_v2"] == pytest.approx(0.62, abs=1e-9)
     assert joined[1]["model_p_up_v2"] is None
+
+
+def test_render_attribution_text_handles_empty_db(tmp_path):
+    """Empty DB renders without errors; counts read zero."""
+    from polypocket.ledger import init_db
+    from polypocket.tui import render_attribution_text
+
+    db = str(tmp_path / "empty.db")
+    init_db(db)
+    text = render_attribution_text(db)
+    assert "PNL ATTRIBUTION" in text
+    assert "Lifetime (n=0)" in text
+
+
+def test_render_attribution_text_with_seeded_trades(tmp_path):
+    """Realized numbers in the rendered text match the trades.pnl sum."""
+    from polypocket.ledger import init_db, log_trade
+    from polypocket.tui import render_attribution_text
+
+    db = str(tmp_path / "seeded.db")
+    init_db(db)
+    log_trade(db_path=db, window_slug="w1", side="up", entry_price=0.60, size=10.0,
+              fees=0.024, model_p_up=0.70, market_p_up=0.58, edge=0.12,
+              outcome="up", pnl=3.976, status="settled",
+              signal_reference_price=0.58, signal_reference_source="exact")
+    text = render_attribution_text(db)
+    assert "+3.98" in text  # realized PnL formatted to 2dp
