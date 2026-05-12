@@ -36,27 +36,40 @@ Expected: green. If it fails with `ModuleNotFoundError: scripts`, stop and add `
 
 ### Step 2: Capture baseline state for later verification
 
-Run:
+Write to a repo-local scratch file (already gitignored under `*.bak.db` siblings; this one we'll add to `.gitignore` in Task 5). Cross-platform: cwd-relative path works under both PowerShell and bash.
 
-```bash
-sqlite3 paper_trades.db "SELECT MAX(id) FROM trades" > /tmp/pre_attrib_max_trade_id.txt
-sqlite3 paper_trades.db "SELECT COUNT(*) FROM trades WHERE status='settled'" >> /tmp/pre_attrib_max_trade_id.txt
-sqlite3 paper_trades.db "SELECT COUNT(*), SUM(CASE WHEN up_bids_json IS NOT NULL AND down_bids_json IS NOT NULL THEN 1 ELSE 0 END) FROM window_snapshots WHERE snapshot_type='decision'" >> /tmp/pre_attrib_max_trade_id.txt
+PowerShell:
+```powershell
+$baseline = ".attrib_baseline.txt"
+sqlite3 paper_trades.db "SELECT MAX(id) FROM trades"                                           | Out-File -Encoding ascii $baseline
+sqlite3 paper_trades.db "SELECT COUNT(*) FROM trades WHERE status='settled'"                   | Out-File -Encoding ascii -Append $baseline
+sqlite3 paper_trades.db "SELECT COUNT(*), SUM(CASE WHEN up_bids_json IS NOT NULL AND up_bids_json NOT IN ('null','[]') AND down_bids_json IS NOT NULL AND down_bids_json NOT IN ('null','[]') THEN 1 ELSE 0 END) FROM window_snapshots WHERE snapshot_type='decision'" | Out-File -Encoding ascii -Append $baseline
 ```
 
-The captured `MAX(id)` becomes the boundary for Task 10 Step 4's 7-day forward-soak check. The bids-JSON count is the expected `"exact"` ceiling for the backfill in Task 5.
+bash / git-bash:
+```bash
+baseline=.attrib_baseline.txt
+sqlite3 paper_trades.db "SELECT MAX(id) FROM trades"                          >  $baseline
+sqlite3 paper_trades.db "SELECT COUNT(*) FROM trades WHERE status='settled'"  >> $baseline
+sqlite3 paper_trades.db "SELECT COUNT(*), SUM(CASE WHEN up_bids_json IS NOT NULL AND up_bids_json NOT IN ('null','[]') AND down_bids_json IS NOT NULL AND down_bids_json NOT IN ('null','[]') THEN 1 ELSE 0 END) FROM window_snapshots WHERE snapshot_type='decision'" >> $baseline
+```
 
-No commit; this is local diagnostic state.
+The captured `MAX(id)` becomes the boundary for Task 10 Step 4's 7-day forward-soak check. The bids-JSON count is the expected `"exact"` ceiling for the backfill — the predicate matches `_classify_and_compute` (NULL, `'null'`, and `'[]'` all tag approximate). On the current paper DB this drops the count by 2 (the two `'[]'` rows) vs the prior `IS NOT NULL`-only predicate.
+
+No commit; `.attrib_baseline.txt` is added to `.gitignore` in Task 5 Step 9.
 
 **Rollback:** N/A (read-only).
 
 ---
 
-## Task 1: Add `signal_reference_price` and `signal_reference_source` columns
+## Task 1: Add `signal_reference_price` + `signal_reference_source` columns; close the conftest gap on `SIGNAL_CUSHION_TICKS`
 
 **Files:**
 - Modify: `polypocket/ledger.py`
 - Modify: `tests/test_ledger.py`
+- Modify: `tests/conftest.py`
+
+> **Why conftest.py here:** Tasks 2 and 5 introduce tests that compute expected values from `SIGNAL_CUSHION_TICKS` (an env-backed constant per `config.py:21`). `tests/conftest.py:15-24` currently purges 7 env keys but does **not** purge `SIGNAL_CUSHION_TICKS` — a developer with `SIGNAL_CUSHION_TICKS=7` in their shell will silently get wrong test math. `project-context.md:81+:115` flags this category as "the single most common silent bug vector." Closed here so the conftest patch lands before the tests that depend on it. `IOC_BUFFER_TICKS` has the same exposure and is added in the same change.
 
 ### Step 1: Write failing test for the new columns
 
@@ -122,21 +135,40 @@ def log_trade(
     pnl: float | None,
     status: str,
     signal_reference_price: float | None = None,
-    signal_reference_source: str = "live",
+    signal_reference_source: str | None = None,
 ) -> int:
 ```
 
-Extend the INSERT column list and parameter tuple correspondingly. Defaults are chosen so all existing callers compile (`None` price / `"live"` source); callers are updated in Task 4.
+Extend the INSERT column list and parameter tuple correspondingly. Defaults are both `None` so existing callers (and ad-hoc test fixtures that don't care about attribution) leave the columns NULL — the Task 5 backfill then picks them up. The Task 4 executor callers explicitly pass `signal_reference_source="live"` to tag forward rows.
 
-### Step 4: Run tests
+### Step 4: Extend `tests/conftest.py`'s purge tuple
 
-Run: `pytest tests/test_ledger.py -v`. Expected: all green (new tests pass; existing tests unchanged).
+Edit `tests/conftest.py`. Add `"SIGNAL_CUSHION_TICKS"` and `"IOC_BUFFER_TICKS"` to the `_key` tuple. Final tuple should read:
 
-### Step 5: Commit
+```python
+for _key in (
+    "MIN_POSITION_USDC",
+    "MAX_POSITION_USDC",
+    "TRADING_MODE",
+    "FOK_SLIPPAGE_TICKS",
+    "DEPTH_CLAMP_BUFFER",
+    "MIN_FILL_RATIO",
+    "MAX_BOOK_AGE_S",
+    "SIGNAL_CUSHION_TICKS",
+    "IOC_BUFFER_TICKS",
+):
+    os.environ.pop(_key, None)
+```
+
+### Step 5: Run tests
+
+Run: `pytest tests/test_ledger.py -v`. Expected: all green (new tests pass; existing tests unchanged). Also run the whole signal suite to confirm the conftest change didn't break anything: `pytest tests/test_signal.py -v`.
+
+### Step 6: Commit
 
 ```bash
-git add polypocket/ledger.py tests/test_ledger.py
-git commit -m "feat(ledger): add signal_reference_price + source columns (PnL attribution)"
+git add polypocket/ledger.py tests/test_ledger.py tests/conftest.py
+git commit -m "feat(ledger): add signal_reference_price + source columns; close conftest gap (PnL attribution)"
 ```
 
 **Rollback:** `git revert HEAD`. New columns are nullable; existing readers unaffected.
@@ -155,14 +187,20 @@ Add to `tests/test_signal.py`:
 
 ```python
 def test_signal_populates_signal_reference_price_for_up_side():
-    """For a UP signal, signal_reference_price equals up_entry = (1 - best_down_bid) + cushion."""
+    """For a UP signal, signal_reference_price equals up_entry = (1 - best_down_bid) + cushion.
+
+    Inputs mirror tests/test_signal.py's existing UP-firing recipe (displacement
+    ≈1z over a 3min residual) so up_edge lands in the [MIN_EDGE_THRESHOLD,
+    MAX_EDGE_THRESHOLD_UP) firing band (config.py:10, :36). Picking larger
+    displacements pushes model_p_up past 0.99 and trips MAX_EDGE_THRESHOLD_UP.
+    """
     from polypocket.signal import SignalEngine
     from polypocket.config import SIGNAL_CUSHION_TICKS
 
     eng = SignalEngine()
     sig = eng.evaluate(
-        displacement=0.005, t_elapsed=120, t_remaining=180, sigma_5min=0.002,
-        up_ask=0.55, down_ask=0.50,
+        displacement=0.0009, t_elapsed=120, t_remaining=180, sigma_5min=0.0012,
+        up_ask=0.58, down_ask=0.50,
         up_bids=[{"price": 0.40}],
         down_bids=[{"price": 0.42}],
     )
@@ -173,20 +211,26 @@ def test_signal_populates_signal_reference_price_for_up_side():
 
 
 def test_signal_populates_signal_reference_price_for_down_side():
-    """For a DOWN signal, signal_reference_price = (1 - best_up_bid) + cushion."""
+    """For a DOWN signal, signal_reference_price = (1 - best_up_bid) + cushion.
+
+    DOWN side needs a higher best_up_bid (lowering down_entry below
+    effective_ask + MIN_EDGE_THRESHOLD_DOWN) AND CALIBRATION_SHRINKAGE_DOWN=0.50
+    is applied (config.py:50). The combination forces tighter inputs than UP.
+    """
     from polypocket.signal import SignalEngine
     from polypocket.config import SIGNAL_CUSHION_TICKS
 
     eng = SignalEngine()
     sig = eng.evaluate(
-        displacement=-0.005, t_elapsed=120, t_remaining=180, sigma_5min=0.002,
-        up_ask=0.50, down_ask=0.55,
-        up_bids=[{"price": 0.42}],
+        displacement=-0.0009, t_elapsed=120, t_remaining=180, sigma_5min=0.0012,
+        up_ask=0.50, down_ask=0.50,
+        up_bids=[{"price": 0.55}],   # high up_bid → low down_entry
         down_bids=[{"price": 0.40}],
     )
     assert sig is not None
     assert sig.side == "down"
-    expected = (1.0 - 0.42) + SIGNAL_CUSHION_TICKS * 0.01
+    # DOWN side's reference is (1 - best_up_bid) + cushion, NOT (1 - best_down_bid).
+    expected = (1.0 - 0.55) + SIGNAL_CUSHION_TICKS * 0.01
     assert sig.signal_reference_price == pytest.approx(expected, abs=1e-9)
 ```
 
@@ -267,6 +311,7 @@ from polypocket.attribution import (
     attribute_pnl,
     attribute_from_row,
     aggregate_attribution,
+    attach_v2_cohort,
 )
 
 
@@ -286,7 +331,11 @@ from polypocket.attribution import (
     ],
 )
 def test_sum_identity(side, won, signal_ref, entry_price):
-    """edge + slip + expected_fee + luck must equal realized_pnl to 1e-9."""
+    """edge + slip + expected_fee + luck must equal realized_pnl to 1e-9.
+
+    Note: attribute_pnl recomputes fees internally from realized size/entry_price.
+    The test supplies realized_pnl using the same formula so the identity is exact.
+    """
     from polypocket.config import fee_shares
 
     size = 50.0
@@ -298,7 +347,7 @@ def test_sum_identity(side, won, signal_ref, entry_price):
     attr = attribute_pnl(
         side=side, size=size, entry_price=entry_price,
         signal_reference_price=signal_ref, model_p_up=model_p_up,
-        fees=fees, outcome=outcome, realized_pnl=realized_pnl,
+        outcome=outcome, realized_pnl=realized_pnl,
     )
     total = attr.edge_value + attr.slip_value + attr.expected_fee_value + attr.luck_value
     assert abs(total - realized_pnl) < 1e-9, f"diff={total - realized_pnl:.2e}"
@@ -317,7 +366,7 @@ def test_signs_are_intuitive_up_win():
     attr = attribute_pnl(
         side="up", size=size, entry_price=entry_price,
         signal_reference_price=0.60, model_p_up=0.80,
-        fees=fees, outcome="up", realized_pnl=realized_pnl,
+        outcome="up", realized_pnl=realized_pnl,
     )
     assert attr.edge_value > 0
     assert attr.slip_value < 0
@@ -349,7 +398,7 @@ def test_sum_identity_property():
         attr = attribute_pnl(
             side=side, size=size, entry_price=entry_price,
             signal_reference_price=signal_ref, model_p_up=model_p_up,
-            fees=fees, outcome=outcome, realized_pnl=realized_pnl,
+            outcome=outcome, realized_pnl=realized_pnl,
         )
         total = attr.edge_value + attr.slip_value + attr.expected_fee_value + attr.luck_value
         assert abs(total - realized_pnl) < 1e-9
@@ -362,17 +411,21 @@ def test_attribute_from_row_handles_missing_signal_reference():
     (caller must filter; aggregates skip these)."""
     row = {
         "side": "up", "size": 50.0, "entry_price": 0.60,
-        "fees": 0.025, "model_p_up": 0.70, "outcome": "up", "pnl": 19.975,
+        "model_p_up": 0.70, "outcome": "up", "pnl": 19.975,
         "signal_reference_price": None, "signal_reference_source": "missing",
     }
     assert attribute_from_row(row) is None
 
 
 def test_attribute_from_row_returns_pnl_attribution_when_complete():
-    """Complete row produces a PnlAttribution using trades.pnl as realized_pnl."""
+    """Complete row produces a PnlAttribution using trades.pnl as realized_pnl.
+
+    fees are recomputed from realized size/entry_price — the row's `fees` field
+    is not read (it's the intended fee, see design §"Math").
+    """
     row = {
         "side": "up", "size": 100.0, "entry_price": 0.62,
-        "fees": 0.0472, "model_p_up": 0.80, "outcome": "up", "pnl": 37.953,
+        "model_p_up": 0.80, "outcome": "up", "pnl": 37.953,
         "signal_reference_price": 0.60, "signal_reference_source": "exact",
     }
     attr = attribute_from_row(row)
@@ -385,7 +438,7 @@ def test_attribute_from_row_requires_pnl():
     """Rows without trades.pnl (unsettled or settled-with-null) are unattributable."""
     row = {
         "side": "up", "size": 100.0, "entry_price": 0.62,
-        "fees": 0.0472, "model_p_up": 0.80, "outcome": "up", "pnl": None,
+        "model_p_up": 0.80, "outcome": "up", "pnl": None,
         "signal_reference_price": 0.60, "signal_reference_source": "exact",
     }
     assert attribute_from_row(row) is None
@@ -397,25 +450,34 @@ def _make_row(slug, source="exact", pnl=1.0, model_p_up=0.70,
               model_p_up_v2=None, entry_price=0.60, signal_ref=0.55):
     return {
         "window_slug": slug, "side": "up", "size": 10.0, "entry_price": entry_price,
-        "fees": 0.005, "model_p_up": model_p_up, "outcome": "up", "pnl": pnl,
+        "model_p_up": model_p_up, "outcome": "up", "pnl": pnl,
         "signal_reference_price": signal_ref, "signal_reference_source": source,
         "model_p_up_v2": model_p_up_v2,
     }
 
 
-def test_aggregate_counts_provenance():
+def test_aggregate_counts_provenance_from_attributable_rows_only():
+    """n_exact/n_approximate/n_missing count only rows that produced an
+    attribution. Rows dropped for null pnl land in n_unattributable instead."""
     rows = [
         _make_row("w1", "exact"),
         _make_row("w2", "exact"),
         _make_row("w3", "approximate"),
         _make_row("w4", "missing"),
         _make_row("w5", None),  # NULL source treated as missing
+        _make_row("w6", "exact", pnl=None),  # null pnl: unattributable
     ]
-    agg = aggregate_attribution(rows)
-    assert agg.n_total == 5
-    assert agg.n_exact == 2
-    assert agg.n_approximate == 1
-    assert agg.n_missing == 2
+    rows[3]["signal_reference_price"] = None  # missing rows have null reference
+    rows[4]["signal_reference_price"] = None
+    agg = aggregate_attribution(rows, include_approximate=True)
+    assert agg.n_total == 6
+    assert agg.n_exact == 2          # w1, w2 (w6 dropped to n_unattributable)
+    assert agg.n_approximate == 1    # w3
+    assert agg.n_missing == 2        # w4, w5
+    assert agg.n_unattributable == 1 # w6
+    # Sanity: counted buckets account for every row.
+    assert (agg.n_exact + agg.n_approximate + agg.n_missing
+            + agg.n_unattributable) == agg.n_total
 
 
 def test_aggregate_excludes_approximate_by_default():
@@ -448,8 +510,14 @@ def test_aggregate_excludes_missing_unconditionally():
     assert agg.realized_pnl == pytest.approx(1.0, abs=1e-9)
 
 
-def test_aggregate_infers_model_version():
-    """A row is v2-cohort iff model_p_up == model_p_up_v2 (the v2 value was the one that fired)."""
+def test_aggregate_infers_model_version_from_joined_v2_column():
+    """A row is v2-cohort iff model_p_up == model_p_up_v2 (the v2 value fired).
+
+    model_p_up_v2 lives on window_snapshots, not trades — callers must use
+    attach_v2_cohort() before passing rows to aggregate_attribution. This test
+    pre-joins the column inline; integration coverage of attach_v2_cohort lives
+    in test_attach_v2_cohort_joins_decision_snapshot below.
+    """
     rows = [
         _make_row("w1", "exact", pnl=1.0, model_p_up=0.70, model_p_up_v2=0.62),  # v1
         _make_row("w2", "exact", pnl=2.0, model_p_up=0.62, model_p_up_v2=0.62),  # v2
@@ -457,6 +525,53 @@ def test_aggregate_infers_model_version():
     agg = aggregate_attribution(rows)
     assert agg.n_v1_attributed == 1
     assert agg.n_v2_attributed == 1
+
+
+def test_aggregate_treats_missing_model_p_up_v2_as_v1():
+    """A row whose model_p_up_v2 key is absent (pre-#15 dual-log, or no join
+    performed) is classified v1, not crashed."""
+    rows = [
+        _make_row("w1", "exact", pnl=1.0, model_p_up=0.70, model_p_up_v2=None),
+    ]
+    rows[0].pop("model_p_up_v2")  # key entirely absent
+    agg = aggregate_attribution(rows)
+    assert agg.n_v1_attributed == 1
+    assert agg.n_v2_attributed == 0
+
+
+def test_attach_v2_cohort_joins_decision_snapshot(tmp_path):
+    """attach_v2_cohort fetches model_p_up_v2 from window_snapshots and merges
+    it into each row dict. Rows without a decision snapshot get None."""
+    from polypocket.ledger import init_db, log_trade, log_snapshot
+    from polypocket.attribution import attach_v2_cohort
+
+    db = str(tmp_path / "j.db")
+    init_db(db)
+    log_trade(db_path=db, window_slug="w1", side="up", entry_price=0.6, size=10.0,
+              fees=0.024, model_p_up=0.7, market_p_up=0.58, edge=0.12,
+              outcome="up", pnl=3.976, status="settled",
+              signal_reference_price=0.58, signal_reference_source="live")
+    log_snapshot(db, "w1", "decision", {
+        "btc_price": 65000, "window_open_price": 64900,
+        "displacement": 0.0015, "sigma_5min": 0.002, "model_p_up": 0.70,
+        "t_remaining": 200, "up_ask": 0.58, "down_ask": 0.42,
+        "market_p_up": 0.58, "edge": 0.12, "preview_side": "up",
+        "quote_status": "ok",
+        "model_p_up_v1_calibrated": 0.70, "model_p_up_v2": 0.62,
+    })
+    # Second trade lacks a decision snapshot.
+    log_trade(db_path=db, window_slug="w2", side="up", entry_price=0.6, size=10.0,
+              fees=0.024, model_p_up=0.7, market_p_up=0.58, edge=0.12,
+              outcome="up", pnl=3.976, status="settled",
+              signal_reference_price=0.58, signal_reference_source="live")
+
+    rows = [
+        {"window_slug": "w1", "model_p_up": 0.70},
+        {"window_slug": "w2", "model_p_up": 0.70},
+    ]
+    joined = attach_v2_cohort(rows, db)
+    assert joined[0]["model_p_up_v2"] == pytest.approx(0.62, abs=1e-9)
+    assert joined[1]["model_p_up_v2"] is None
 ```
 
 Run: `pytest tests/test_attribution.py -v`. Expected: all FAIL on `ModuleNotFoundError`.
@@ -476,9 +591,23 @@ live ledgers). The decomposition does NOT recompute realized_pnl from a
 formula, because on live trades the algebraic formula diverges from
 trades.pnl (see design doc §"Decomposition").
 
+Fees are recomputed internally from realized size/entry_price via
+`config.fee_shares` — `trades.fees` is the intended fee (logged at submit-time
+from intended values, never refreshed). On live partial fills, intended ≠
+realized; recomputing here keeps every component scaled by the same trade.
+
+Model-version (v1 vs v2) cohort assignment requires `model_p_up_v2` from
+window_snapshots — use `attach_v2_cohort(rows, db_path)` before passing to
+aggregate_attribution if you want the split. Without the join, all rows are
+classified v1.
+
 See docs/plans/2026-05-11-pnl-attribution-design.md for the full algebra.
 """
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
+
+from polypocket.config import fee_shares
 
 
 @dataclass(frozen=True)
@@ -488,7 +617,12 @@ class PnlAttribution:
     slip_value: float
     expected_fee_value: float
     luck_value: float
-    # Auxiliary (reported alongside, not in the principal sum):
+    # Auxiliary (reported alongside, not in the principal sum). `realized_fee_value`
+    # is `-fees if won else 0` using the *recomputed* fee from realized
+    # size/entry_price — accurate on paper; on live it's the "fee that would
+    # have been paid at the realized fill price if Polymarket's fee schedule
+    # matched our formula exactly." Algebra-vs-CLOB residual on live is
+    # absorbed into luck_value (design risk #2).
     realized_fee_value: float
     fee_luck_value: float  # realized_fee_value - expected_fee_value
     # Provenance + cohort
@@ -507,7 +641,6 @@ def attribute_pnl(
     entry_price: float,
     signal_reference_price: float,
     model_p_up: float,
-    fees: float,
     outcome: str,
     realized_pnl: float,
     signal_reference_source: str = "live",
@@ -517,20 +650,23 @@ def attribute_pnl(
 
     Args:
       side: 'up' or 'down' — the side the trade bought.
-      size: shares held after fill.
-      entry_price: actual VWAP fill (post-fill `update_trade` value on live).
+      size: shares held after fill (realized, from trades.size post-update).
+      entry_price: actual VWAP fill (realized, from trades.entry_price post-update).
       signal_reference_price: the price the gate compared model_p_up against.
         Side-aligned (i.e., the executable entry on the chosen side).
       model_p_up: P(BTC up) at decision; this function flips for DOWN side.
-      fees: trades.fees — the *intended* fee (logged from intended size/price).
-        On live, this is an estimate; on paper, it equals the realized fee on win.
       outcome: 'up' or 'down' — the resolved outcome.
       realized_pnl: trades.pnl — authoritative realized PnL from the settle path.
       signal_reference_source: provenance tag for the reference price.
       model_version_attributed: 'v1' or 'v2' — which model drove this trade.
+
+    Note: fees are intentionally NOT a parameter. They are recomputed from
+    realized size/entry_price via config.fee_shares so the algebra is
+    internally consistent across paper, live full fills, and live partial fills.
     """
     won = side == outcome
     model_p_for_side = _side_aligned_model_p(model_p_up, side)
+    fees = fee_shares(size, entry_price)
     edge_value = size * (model_p_for_side - signal_reference_price)
     slip_value = size * (signal_reference_price - entry_price)
     expected_fee_value = -fees * model_p_for_side
@@ -556,7 +692,8 @@ def _infer_model_version(row: dict) -> str:
     """Infer which model drove the trade by comparing model_p_up with model_p_up_v2.
 
     Per signal.py:99-102, trades.model_p_up == model_p_up_v2 iff MODEL_VERSION=v2
-    was active. If the v2 column is NULL (pre-#15 dual-logging) treat as v1.
+    was active. If the v2 column is NULL or absent (pre-#15 dual-logging, or
+    the caller skipped attach_v2_cohort) treat as v1.
     """
     v2 = row.get("model_p_up_v2")
     if v2 is None:
@@ -569,8 +706,10 @@ def attribute_from_row(row: dict) -> PnlAttribution | None:
 
     Skips rows missing pnl, signal_reference_price, outcome, or any required field.
     Use this in aggregation loops; callers should filter Nones and count them.
+
+    `fees` is NOT in the required set — it's recomputed inside attribute_pnl.
     """
-    required = ("side", "size", "entry_price", "fees", "model_p_up",
+    required = ("side", "size", "entry_price", "model_p_up",
                 "outcome", "signal_reference_price", "pnl")
     for key in required:
         if row.get(key) is None:
@@ -578,19 +717,56 @@ def attribute_from_row(row: dict) -> PnlAttribution | None:
     return attribute_pnl(
         side=row["side"], size=row["size"], entry_price=row["entry_price"],
         signal_reference_price=row["signal_reference_price"],
-        model_p_up=row["model_p_up"], fees=row["fees"],
+        model_p_up=row["model_p_up"],
         outcome=row["outcome"], realized_pnl=row["pnl"],
         signal_reference_source=row.get("signal_reference_source") or "unknown",
         model_version_attributed=_infer_model_version(row),
     )
 
 
+def attach_v2_cohort(rows: list[dict], db_path: str) -> list[dict]:
+    """Join model_p_up_v2 from window_snapshots into each row by window_slug.
+
+    Pure helper for callers (analyze.py, render_attribution_text, report) that
+    want the v1/v2 cohort split. `model_p_up_v2` lives on window_snapshots
+    (#15 dual-logging), not trades — without this join, _infer_model_version
+    classifies every row as v1.
+
+    Rows are returned as new dicts (shallow-copied + augmented); the input
+    list is not mutated. Rows whose window_slug has no decision snapshot get
+    model_p_up_v2 = None.
+    """
+    slugs = [r["window_slug"] for r in rows if r.get("window_slug")]
+    if not slugs:
+        return [dict(r) for r in rows]
+    placeholders = ",".join("?" * len(slugs))
+    by_slug: dict[str, float | None] = {}
+    with closing(sqlite3.connect(db_path)) as conn:
+        for slug, v2 in conn.execute(
+            f"SELECT window_slug, model_p_up_v2 FROM window_snapshots "
+            f"WHERE snapshot_type='decision' AND window_slug IN ({placeholders})",
+            slugs,
+        ).fetchall():
+            by_slug[slug] = v2
+    out = []
+    for r in rows:
+        new = dict(r)
+        new["model_p_up_v2"] = by_slug.get(r.get("window_slug"))
+        out.append(new)
+    return out
+
+
 @dataclass(frozen=True)
 class AggregateAttribution:
+    # n_total = n_exact + n_approximate + n_missing + n_unattributable.
+    # The first three are *attributable* rows (have non-null pnl / signal_ref);
+    # n_unattributable counts rows dropped despite a valid provenance tag
+    # (typically null pnl from settle_live_trade lookup failures).
     n_total: int
     n_exact: int
     n_approximate: int
     n_missing: int
+    n_unattributable: int
     n_v1_attributed: int
     n_v2_attributed: int
     realized_pnl: float
@@ -616,26 +792,50 @@ def aggregate_attribution(
 
     Missing-source rows are excluded unconditionally (no signal_reference_price
     to attribute against).
+
+    Provenance counts come from the SAME pass that builds the sums — a row
+    tagged 'exact' but dropped because pnl IS NULL lands in n_unattributable,
+    not n_exact, so the four count buckets sum to n_total.
     """
     n_total = len(rows)
-    n_exact = sum(1 for r in rows if r.get("signal_reference_source") == "exact"
-                  or r.get("signal_reference_source") == "live")
-    n_approximate = sum(1 for r in rows if r.get("signal_reference_source") == "approximate")
-    n_missing = sum(
-        1 for r in rows
-        if r.get("signal_reference_source") in (None, "missing")
-        or r.get("signal_reference_price") is None
-    )
-
+    n_exact = n_approximate = n_missing = n_unattributable = 0
     n_v1 = n_v2 = 0
     realized_pnl = edge_sum = slip_sum = expected_fee_sum = luck_sum = 0.0
     realized_fee_sum = fee_luck_sum = 0.0
+
     for r in rows:
-        if not include_approximate and r.get("signal_reference_source") == "approximate":
+        src = r.get("signal_reference_source")
+        # Classify provenance before attribution attempt; final bucket may
+        # downgrade to n_unattributable if attribute_from_row returns None
+        # for a reason other than missing reference (e.g., null pnl).
+        if src in (None, "missing") or r.get("signal_reference_price") is None:
+            provenance = "missing"
+        elif src == "approximate":
+            provenance = "approximate"
+        else:  # 'exact' or 'live'
+            provenance = "exact"
+
+        if provenance == "approximate" and not include_approximate:
+            n_approximate += 1
             continue
+
         a = attribute_from_row(r)
         if a is None:
+            if provenance == "missing":
+                n_missing += 1
+            else:
+                n_unattributable += 1
             continue
+
+        # Successful attribution — count by provenance, accumulate sums.
+        if provenance == "exact":
+            n_exact += 1
+        elif provenance == "approximate":
+            n_approximate += 1
+        else:  # provenance == "missing" but attribute_from_row returned non-None
+            # (shouldn't happen — missing implies null reference — but defensive)
+            n_missing += 1
+
         realized_pnl += a.realized_pnl
         edge_sum += a.edge_value
         slip_sum += a.slip_value
@@ -649,7 +849,8 @@ def aggregate_attribution(
             n_v1 += 1
 
     return AggregateAttribution(
-        n_total=n_total, n_exact=n_exact, n_approximate=n_approximate, n_missing=n_missing,
+        n_total=n_total, n_exact=n_exact, n_approximate=n_approximate,
+        n_missing=n_missing, n_unattributable=n_unattributable,
         n_v1_attributed=n_v1, n_v2_attributed=n_v2,
         realized_pnl=realized_pnl, edge_sum=edge_sum, slip_sum=slip_sum,
         expected_fee_sum=expected_fee_sum, luck_sum=luck_sum,
@@ -659,7 +860,7 @@ def aggregate_attribution(
 
 ### Step 3: Run tests
 
-Run: `pytest tests/test_attribution.py -v`. Expected: all green (8 parametric, 1 intuition, 1 property, 3 row-adapter, 5 aggregator = 18 tests).
+Run: `pytest tests/test_attribution.py -v`. Expected: all green (8 parametric sum-identity, 1 intuition, 1 property, 3 row-adapter, 7 aggregator+join = 20 tests).
 
 ### Step 4: Commit
 
@@ -1023,14 +1224,23 @@ Write `scripts/_backfill_signal_reference.md`:
 - Task 10 Step 4's forward-soak boundary is MAX(trades.id) = N_PRE.
 ```
 
-Fill `N_PRE` / `M_PRE` / `K_PRE` / `TOTAL_DECISION_PRE` from the file written in Task 0 Step 2.
+Fill `N_PRE` / `M_PRE` / `K_PRE` / `TOTAL_DECISION_PRE` from `.attrib_baseline.txt` written in Task 0 Step 2.
 
-### Step 9: Commit
+### Step 9: Gitignore the local baseline file
+
+Append to `.gitignore`:
+
+```
+# PnL attribution local baseline (captured at Task 0; never committed).
+.attrib_baseline.txt
+```
+
+### Step 10: Commit
 
 ```bash
 git add polypocket/executor.py tests/test_executor.py \
         scripts/backfill_signal_reference.py tests/test_backfill_signal_reference.py \
-        scripts/_backfill_signal_reference.md
+        scripts/_backfill_signal_reference.md .gitignore
 git commit -m "feat(attribution): persist signal_reference_price live + backfill history"
 ```
 
@@ -1052,11 +1262,22 @@ In `polypocket/analyze.py`, after the existing reliability section, add:
     h2("7. PnL Attribution")
     # ================================================================
 
-    from polypocket.attribution import aggregate_attribution
+    from polypocket.attribution import aggregate_attribution, attach_v2_cohort
 
-    agg_lifetime = aggregate_attribution(settled)
-    agg_lifetime_all = aggregate_attribution(settled, include_approximate=True)
-    agg_last20 = aggregate_attribution(settled[-20:]) if settled else None
+    # Re-fetch settled rows in id order — analyze.py's top-level `trades` is
+    # ORDER BY timestamp, which can diverge from id order on backfilled rows.
+    # All three attribution surfaces (analyze, TUI, report) standardize on id.
+    settled_by_id = sorted(
+        [t for t in trades if t["status"] == "settled"],
+        key=lambda t: t["id"],
+    )
+    # Join model_p_up_v2 from window_snapshots so the v1/v2 cohort split works
+    # (model_p_up_v2 is not on the trades table).
+    settled_joined = attach_v2_cohort(settled_by_id, db_path)
+
+    agg_lifetime = aggregate_attribution(settled_joined)
+    agg_lifetime_all = aggregate_attribution(settled_joined, include_approximate=True)
+    agg_last20 = aggregate_attribution(settled_joined[-20:]) if settled_joined else None
 
     def _fmt_agg(label, a) -> list:
         if a is None or a.n_total == 0:
@@ -1086,20 +1307,26 @@ In `polypocket/analyze.py`, after the existing reliability section, add:
       f"slip=${agg_lifetime_all.slip_sum:+.2f}")
     p(f"**Provenance:** exact/live={agg_lifetime.n_exact}, "
       f"approximate={agg_lifetime.n_approximate}, "
-      f"missing={agg_lifetime.n_missing}")
+      f"missing={agg_lifetime.n_missing}, "
+      f"unattributable={agg_lifetime.n_unattributable}")
     p(f"**Model cohort:** v1-attributed={agg_lifetime.n_v1_attributed}, "
       f"v2-attributed={agg_lifetime.n_v2_attributed}")
 ```
 
 ### Step 2: Smoke test on the actual DB
 
-Run the report:
+Run the report (cross-platform: write to cwd; remove after inspection):
 
 ```bash
-python -c "from polypocket.analyze import generate_report; print(generate_report('paper_trades.db'))" > /tmp/report.md
+python -c "from polypocket.analyze import generate_report; print(generate_report('paper_trades.db'))" > _section7_smoke.md
 ```
 
-Expected: report includes a "7. PnL Attribution" section with non-empty numbers and both headline and context lines. Sanity: `Realized` in the context (all rows) equals the sum of `pnl` from settled trades where `signal_reference_source` is not `"missing"` and `pnl` is not NULL.
+PowerShell equivalent:
+```powershell
+python -c "from polypocket.analyze import generate_report; print(generate_report('paper_trades.db'))" | Out-File -Encoding utf8 _section7_smoke.md
+```
+
+Expected: report includes a "7. PnL Attribution" section with non-empty numbers and both headline and context lines. Sanity: `Realized` in the context (all rows) equals the sum of `pnl` from settled trades where `signal_reference_source` is not `"missing"` and `pnl` is not NULL. Delete `_section7_smoke.md` after inspecting; it's not tracked.
 
 ### Step 3: Commit
 
@@ -1131,7 +1358,7 @@ def render_attribution_text(db_path: str) -> str:
     """
     import sqlite3
     from contextlib import closing
-    from polypocket.attribution import aggregate_attribution
+    from polypocket.attribution import aggregate_attribution, attach_v2_cohort
 
     with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
@@ -1139,6 +1366,8 @@ def render_attribution_text(db_path: str) -> str:
             "SELECT * FROM trades WHERE status='settled' ORDER BY id"
         ).fetchall()]
 
+    # Join model_p_up_v2 so the v1/v2 cohort line reflects reality.
+    all_settled = attach_v2_cohort(all_settled, db_path)
     last20 = all_settled[-20:]
     agg_life = aggregate_attribution(all_settled)
     agg_20 = aggregate_attribution(last20)
@@ -1158,7 +1387,8 @@ def render_attribution_text(db_path: str) -> str:
     lines.append(f"  {fmt(agg_20)}")
     lines.append("")
     lines.append(f"Provenance: exact/live={agg_life.n_exact} "
-                 f"approx={agg_life.n_approximate} missing={agg_life.n_missing}")
+                 f"approx={agg_life.n_approximate} missing={agg_life.n_missing} "
+                 f"unattributable={agg_life.n_unattributable}")
     lines.append(f"Cohort: v1={agg_life.n_v1_attributed} v2={agg_life.n_v2_attributed}")
     return "\n".join(lines)
 
@@ -1249,18 +1479,24 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from polypocket.attribution import aggregate_attribution
+from polypocket.attribution import aggregate_attribution, attach_v2_cohort
 from polypocket.config import LIVE_DB_PATH, PAPER_DB_PATH
 
 
 def _load_settled(db_path: str) -> list[dict]:
+    """Return settled trades joined with model_p_up_v2 from window_snapshots.
+
+    Empty list if the DB does not exist. ORDER BY id (not timestamp) so the
+    rows[-20:] / rows[-100:] slices match analyze.py and the TUI.
+    """
     if not os.path.exists(db_path):
         return []
     with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        return [dict(r) for r in conn.execute(
+        rows = [dict(r) for r in conn.execute(
             "SELECT * FROM trades WHERE status='settled' ORDER BY id"
         ).fetchall()]
+    return attach_v2_cohort(rows, db_path)
 
 
 def _section(name: str, rows: list[dict]) -> list[str]:
@@ -1289,7 +1525,8 @@ def _section(name: str, rows: list[dict]) -> list[str]:
     )
     out.append(
         f"**Provenance:** exact/live={agg_life.n_exact}, "
-        f"approximate={agg_life.n_approximate}, missing={agg_life.n_missing}\n"
+        f"approximate={agg_life.n_approximate}, missing={agg_life.n_missing}, "
+        f"unattributable={agg_life.n_unattributable}\n"
     )
     out.append(
         f"**Model cohort:** v1-attributed={agg_life.n_v1_attributed}, "

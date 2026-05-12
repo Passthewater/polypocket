@@ -43,9 +43,9 @@ Let one settled trade have:
 - `model_p_up_for_side` = `model_p_up` if `side == "up"` else `1 - model_p_up`.
 - `signal_ref_for_side` = `signal_reference_price` (already in side-aligned units — the executable entry on the chosen side).
 - `entry_for_side` = `entry_price` (likewise).
-- `fees` = `fee_shares(size, entry_price)` — shares-denominated fee from `config.py`.
+- `fees` = `fee_shares(size, entry_price)` — **recomputed from the realized `size` and `entry_price`** at attribution time, not read from `trades.fees`. `trades.fees` was logged at submit-time using *intended* size/price and is never updated; on live partial fills it diverges from the algebra-consistent fee. Recomputing here keeps every component scaled by the same realized trade.
 - `won = (side == outcome)`.
-- `realized_pnl = (size - fees) - entry_price * size` if `won`, else `-entry_price * size`.
+- `realized_pnl = (size - fees) - entry_price * size` if `won`, else `-entry_price * size` — *informational only*; the algebra below reads `realized_pnl` from `trades.pnl`, not from this formula.
 
 ### Decomposition (ex-ante fee variant — principal)
 
@@ -68,7 +68,7 @@ Sum identity (definitional): `edge + slip + expected_fee + luck ≡ realized_pnl
 
 ### Interpretation
 
-- **edge_value** — value of the model's bet at the price the gate said we were betting at. If the model is well-calibrated and aggregated over many trades, `sum(edge_value) ≈ sum(realized_pnl) - sum(slip) - sum(expected_fee)`. Negative average edge means we're firing trades where the model didn't actually disagree with the reference price after the gate's own thresholds applied — a config/threshold bug, not a model bug.
+- **edge_value** — raw probability-vs-price gap, `size * (model_p_for_side - signal_ref)`, **not** the same quantity the gate compares against `MIN_EDGE_THRESHOLD`. The gate uses `model_p_up - effective_ask(signal_ref)` where `effective_ask` inflates the price by the fee surcharge (`config.py:effective_ask`). The fee surcharge is therefore *not* fully absorbed into `expected_fee_value` — a ~1¢ wedge falls into `edge_value`. So `edge_value > 0` does **not** mean "the gate said yes net of fees"; for that interpretation you'd add `edge_value + expected_fee_value` and compare against zero. The two-term sum is what calibrates against `mean(luck) → 0`, not `edge_value` alone.
 - **slip_value** — signed VWAP slip from gate reference to actual fill. Captures IOC buffer drag, queue priority loss, and book moves between `t_signal` and `t_fill`. Should be ≤ 0 in expectation under the current "buffer-above-mid" execution policy; positive slip in aggregate means the book is moving in our favor between decision and fill (rare; usually a sign the decision was late).
 - **expected_fee_value** — fee budget in expectation. Strictly ≤ 0. Comparing `expected_fee` against `realized_fee` (= `-fees if won else 0`) over many trades surfaces whether we're paying fees more often than the model predicts (i.e., winning more than expected — a happy regime — or fees mis-spec'd).
 - **luck_value** — `realized − expected`. Mean across many trades should be ≈ 0 if the model is well-calibrated. Systematic non-zero mean ⇒ miscalibration; this is the same signal the per-bin reliability diagram surfaces, but in dollar units. The two should agree; if they disagree there is a coverage bug. (No new statistical claim — just a check.)
@@ -84,7 +84,7 @@ The report emits **both** columns (`expected_fee_value` is the principal; `reali
 
 ### Sum-identity unit tests (gating)
 
-Eight hand-built cases — `{up,down} × {win,loss} × {signal_ref < entry, signal_ref > entry}` — assert `|edge + slip + expected_fee + luck - realized_pnl| < 1e-9` for every case. A ninth case (fees=0, size=0 degenerate) checks the formula doesn't divide-by-anything.
+Eight hand-built cases — `{up,down} × {win,loss} × {signal_ref < entry, signal_ref > entry}` — assert `|edge + slip + expected_fee + luck - realized_pnl| < 1e-9` for every case.
 
 ## Required new data: `signal_reference_price` on `trades`
 
@@ -120,6 +120,8 @@ aggregate_attribution(rows: list[Attribution]) -> AggregateAttribution
 
 returning per-component sums, per-component means, count of rows with `signal_reference_source = "exact"` vs `"approximate"`, and the realized-vs-expected fee gap. The caller (TUI / report / analyze.py) decides the rolling window.
 
+**Model-version cohort split requires a join.** `model_p_up_v2` lives on `window_snapshots` (`ledger.py:125-126`), not on `trades`. Callers that want the v1/v2 split must fetch `model_p_up_v2` from the `decision` snapshot for each trade's `window_slug` and merge it into the row dict before passing to `aggregate_attribution`. A helper `attach_v2_cohort(rows, db_path)` in `polypocket/attribution.py` performs this join once; aggregate_attribution treats `model_p_up_v2` as optional (NULL → v1) so callers that don't care can skip the join.
+
 Three call sites:
 
 1. **TUI panel `AttributionPanel`** — left-aligned column showing rolling 20-trade and lifetime sums in USDC, refreshes on every settled-trade event. Lives next to the existing `StatusPanel`.
@@ -146,7 +148,7 @@ No change to `bot.py`, `observer.py`, `risk.py`, `fillmodel.py`, `backtester.py`
 - **Execution improvement.** The brainstorm's Tier-1 adaptive-buffer idea (#11) is a separate plan that *consumes* `slip_value` as its objective.
 - **Sizing improvement.** Fractional-Kelly (#21) consumes `edge_value` as its expected-return input but is a separate plan.
 - **Per-feature attribution (SHAP/LIME).** Out of scope — would require model internals and is overkill at n≈400 settled trades.
-- **Size-slip attribution.** Today every fill is FOK so `filled_size == intended_size` or the trade rejects. Once IOC partials are routine, a `size_slip_value` term will be needed; the schema reserves the conceptual slot but doesn't materialize it yet.
+- **Size-slip attribution.** Live executor uses IOC (`executor.py:341`) and accepts partial fills (`update_trade` overwrites `size` / `entry_price` to the realized VWAP). Paper rejects-or-fills-fully. A future `size_slip_value` term would attribute the cost of under-fill (e.g., intended_size − filled_size at the prevailing price). Out of scope here; the partial-fill data needed for it is recoverable from `order_events` `submit` payloads when the time comes. The present algebra papers over partials by recomputing `fees` from realized `size` / `entry_price` at attribution time so every component scales by the same realized trade.
 - **Real-time per-tick attribution.** Attribution materializes at settlement only. The brainstorm's "live edge histogram" (Idea #42) is the pre-fire view; attribution is the post-settle view.
 
 ## Acceptance
@@ -180,9 +182,11 @@ No change to `bot.py`, `observer.py`, `risk.py`, `fillmodel.py`, `backtester.py`
 
 3. **Calibration confounds luck.** If v1 is meaningfully miscalibrated (the #15 motivating finding), `sum(luck_value)` over the v1 corpus will be systematically non-zero, and a naive reader may interpret that as "model edge was overstated" rather than "model probability was miscalibrated". These are the same statement at the aggregate, but the per-trade decomposition will assign the gap to `luck`. Mitigation: the report's narrative paragraph explicitly cross-references the reliability section ("if the mean of `luck` exceeds its bootstrap CI under zero-error H0, model is miscalibrated, not unlucky"). Once v2 ships and calibrates the 0.80+ bin, `mean(luck)` on v2-attributed rows should drift toward zero — making attribution itself a v1-vs-v2 evaluation tool. The aggregator splits totals by inferred `MODEL_VERSION` (v1 vs v2) so this comparison is one query, not a join.
 
-4. **Cushion drift on historical backfill.** `SIGNAL_CUSHION_TICKS = 8` today; if it was different at a historical row's decision time, the backfill's recomputed `signal_reference_price` will not equal the value the gate actually used. The plan does not attempt to detect or correct this — the backfill uses the current constant, and the residual error lands in `slip_value`. Mitigation: documented as a known limitation. If cushion was retuned in the interim (Git-blameable), re-run the backfill against the affected date range as a one-off (manual). Single-author repo; cushion retunes are infrequent; cost of getting this wrong is small (a known constant bias on one cohort) versus the cost of building drift-detection infrastructure that may never be exercised.
+4. **Stranded-fill rows carry book drift inside slip.** `reconcile_recovered_trade` (`executor.py:120-122`) on a stranded-fill promote runs `update_trade(..., size=info.shares_held, entry_price=avg_price)` against a row whose `signal_reference_price` was persisted at the *original* decision time. The book moved between decision and the (eventually-observed) match; the resulting attribution attributes that drift to `slip_value` even when the original decision was clean. Mitigation: stranded-fill rows are rare (one observed per quarter) and the bias has a known sign (slip absorbs all post-decision book drift on those rows). Tag them `signal_reference_source = "stranded"` in a future revision if the cohort grows large enough to warrant separating; for now they're indistinguishable from `"live"`.
 
-5. **Aggregate-window cherry-picking.** Choosing the "right" rolling window post-hoc to make a tweak look good is the obvious anti-pattern. Mitigation: report fixes the windows (rolling 20, rolling 100, lifetime, last 7 days) and forbids new windows being added without a documented rationale; weekly report is the authoritative artifact, not ad-hoc TUI screenshots.
+5. **Cushion drift on historical backfill.** `SIGNAL_CUSHION_TICKS = 8` today; if it was different at a historical row's decision time, the backfill's recomputed `signal_reference_price` will not equal the value the gate actually used. The plan does not attempt to detect or correct this — the backfill uses the current constant, and the residual error lands in `slip_value`. Mitigation: documented as a known limitation. If cushion was retuned in the interim (Git-blameable), re-run the backfill against the affected date range as a one-off (manual). Single-author repo; cushion retunes are infrequent; cost of getting this wrong is small (a known constant bias on one cohort) versus the cost of building drift-detection infrastructure that may never be exercised.
+
+6. **Aggregate-window cherry-picking.** Choosing the "right" rolling window post-hoc to make a tweak look good is the obvious anti-pattern. Mitigation: report fixes the windows (rolling 20, rolling 100, lifetime, last 7 days) and forbids new windows being added without a documented rationale; weekly report is the authoritative artifact, not ad-hoc TUI screenshots.
 
 ## Out of scope (future)
 
@@ -195,14 +199,14 @@ No change to `bot.py`, `observer.py`, `risk.py`, `fillmodel.py`, `backtester.py`
 
 ## Artifact
 
-`scripts/_pnl_attribution.md` — committed report:
+`scripts/_pnl_attribution.md` — committed report (v1 scope):
 
-- Lifetime: `(N, realized_pnl, edge, slip, expected_fee, luck, realized_fee, fee_luck)` table.
-- Rolling 20-trade and rolling 100-trade aggregates.
-- Per-`model_p_up`-decile breakdown (mirror of reliability section).
-- Per-day trend (last 30d).
-- Top-5 slip-cost trades and top-5 luck-loss trades, with `window_slug` for replay.
-- Provenance counter: `N_exact / N_approximate / N_missing`.
+- Lifetime, rolling 100-trade, rolling 20-trade: `(N, realized_pnl, edge, slip, expected_fee, luck, fee_luck)` table per paper / live ledger.
+- Context line: same totals including approximate rows, for comparison.
+- Provenance counter: `N_exact / N_approximate / N_missing` and `n_unattributable_due_to_null_pnl`.
+- Model cohort: `v1-attributed` / `v2-attributed`.
+
+Decile breakdown, per-day trend, and top-5-trade tables are deferred — they slice attribution by a second axis (cohort, time, magnitude), which is the workstream listed under "Conditional cohort attribution" in §"Out of scope".
 
 `scripts/_backfill_signal_reference.md` — one-shot backfill log, including per-provenance counts and the aggregate exact-vs-approximate diff.
 
