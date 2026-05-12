@@ -74,6 +74,10 @@ def init_db(db_path: str) -> None:
                 conn.execute("ALTER TABLE trades ADD COLUMN external_order_id TEXT")
             if "error" not in existing_cols:
                 conn.execute("ALTER TABLE trades ADD COLUMN error TEXT")
+            if "signal_reference_price" not in existing_cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN signal_reference_price REAL")
+            if "signal_reference_source" not in existing_cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN signal_reference_source TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS window_snapshots (
@@ -257,14 +261,17 @@ def log_trade(
     outcome: str | None,
     pnl: float | None,
     status: str,
+    signal_reference_price: float | None = None,
+    signal_reference_source: str | None = None,
 ) -> int:
     with closing(sqlite3.connect(db_path)) as conn:
         cursor = conn.execute(
             """
             INSERT INTO trades (
                 window_slug, side, entry_price, size, fees,
-                model_p_up, market_p_up, edge, outcome, pnl, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                model_p_up, market_p_up, edge, outcome, pnl, status,
+                signal_reference_price, signal_reference_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 window_slug,
@@ -278,6 +285,8 @@ def log_trade(
                 outcome,
                 pnl,
                 status,
+                signal_reference_price,
+                signal_reference_source,
             ),
         )
         conn.commit()

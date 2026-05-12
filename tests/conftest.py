@@ -20,5 +20,7 @@ for _key in (
     "DEPTH_CLAMP_BUFFER",
     "MIN_FILL_RATIO",
     "MAX_BOOK_AGE_S",
+    "SIGNAL_CUSHION_TICKS",
+    "IOC_BUFFER_TICKS",
 ):
     os.environ.pop(_key, None)

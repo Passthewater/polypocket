@@ -526,3 +526,30 @@ def test_log_order_event_preserves_none_external_order_id():
     rows = get_order_events(db_path, 1)
     assert rows[0]["external_order_id"] is None  # null, not empty string
     os.unlink(db_path)
+
+
+def test_init_db_adds_signal_reference_columns(tmp_path):
+    """trades table gains signal_reference_price + signal_reference_source as nullable columns."""
+    import sqlite3
+    from polypocket.ledger import init_db
+
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    with sqlite3.connect(db) as c:
+        cols = {row[1]: row[2] for row in c.execute("PRAGMA table_info(trades)").fetchall()}
+    assert cols.get("signal_reference_price") == "REAL"
+    assert cols.get("signal_reference_source") == "TEXT"
+
+
+def test_init_db_signal_reference_columns_are_idempotent(tmp_path):
+    """Calling init_db twice does not error and does not duplicate columns."""
+    import sqlite3
+    from polypocket.ledger import init_db
+
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    init_db(db)
+    with sqlite3.connect(db) as c:
+        col_count = sum(1 for row in c.execute("PRAGMA table_info(trades)").fetchall()
+                        if row[1] == "signal_reference_price")
+    assert col_count == 1
