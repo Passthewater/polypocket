@@ -104,7 +104,8 @@ class TradesPanel(Static):
         if not trades:
             lines.append("  No trades yet")
         for trade in trades:
-            timestamp = trade["timestamp"][:8] if trade["timestamp"] else ""
+            # "2026-05-12 00:52:51" -> "05-12 00:52"
+            timestamp = trade["timestamp"][5:16] if trade["timestamp"] else ""
             side = trade["side"].upper()
             status = trade["status"]
             pnl = trade["pnl"]
@@ -113,8 +114,8 @@ class TradesPanel(Static):
             if pnl is not None:
                 outcome = "Won" if pnl > 0 else "Lost"
                 pnl_str = f"${pnl:+.2f}"
-                model_str = f"model {model:.0%}" if model else ""
-                market_str = f"mkt {market:.0%}" if market else ""
+                model_str = f"model {model:.0%}" if model is not None else ""
+                market_str = f"mkt {market:.0%}" if market is not None else ""
                 lines.append(f"  {timestamp} {side:4s} {outcome} {pnl_str}  ({model_str} / {market_str})")
             else:
                 lines.append(f"  {timestamp} {side:4s} {status}")
