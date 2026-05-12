@@ -396,7 +396,61 @@ def generate_report(db_path: str = PAPER_DB_PATH) -> str:
     )
 
     # ================================================================
-    h2("7. Raw Snapshot Data")
+    h2("7. PnL Attribution")
+    # ================================================================
+
+    from polypocket.attribution import aggregate_attribution, attach_v2_cohort
+
+    # Re-fetch settled rows in id order — analyze.py's top-level `trades` is
+    # ORDER BY timestamp, which can diverge from id order on backfilled rows.
+    # All three attribution surfaces (analyze, TUI, report) standardize on id.
+    settled_by_id = sorted(
+        [t for t in trades if t["status"] == "settled"],
+        key=lambda t: t["id"],
+    )
+    # Join model_p_up_v2 from window_snapshots so the v1/v2 cohort split works
+    # (model_p_up_v2 is not on the trades table).
+    settled_joined = attach_v2_cohort(settled_by_id, db_path)
+
+    agg_lifetime = aggregate_attribution(settled_joined)
+    agg_lifetime_all = aggregate_attribution(settled_joined, include_approximate=True)
+    agg_last20 = aggregate_attribution(settled_joined[-20:]) if settled_joined else None
+
+    def _fmt_agg(label, a) -> list:
+        if a is None or a.n_total == 0:
+            return [label, "--", "--", "--", "--", "--", "--", "--"]
+        return [
+            label, a.n_total,
+            f"${a.realized_pnl:+.2f}",
+            f"${a.edge_sum:+.2f}",
+            f"${a.slip_sum:+.2f}",
+            f"${a.expected_fee_sum:+.2f}",
+            f"${a.luck_sum:+.2f}",
+            f"${a.fee_luck_sum:+.2f}",
+        ]
+
+    p("**Headline (exact + live rows only)** -- `approximate` rows excluded "
+      "because their slip is biased toward zero (see design doc).")
+    table(
+        ["Window", "N", "Realized", "Edge", "Slip", "Exp.Fee", "Luck", "Fee-luck"],
+        [
+            _fmt_agg("Lifetime", agg_lifetime),
+            _fmt_agg("Last 20", agg_last20),
+        ],
+    )
+    p(f"**Context (all rows incl. approximate):** "
+      f"realized=${agg_lifetime_all.realized_pnl:+.2f}, "
+      f"edge=${agg_lifetime_all.edge_sum:+.2f}, "
+      f"slip=${agg_lifetime_all.slip_sum:+.2f}")
+    p(f"**Provenance:** exact/live={agg_lifetime.n_exact}, "
+      f"approximate={agg_lifetime.n_approximate}, "
+      f"missing={agg_lifetime.n_missing}, "
+      f"unattributable={agg_lifetime.n_unattributable}")
+    p(f"**Model cohort:** v1-attributed={agg_lifetime.n_v1_attributed}, "
+      f"v2-attributed={agg_lifetime.n_v2_attributed}")
+
+    # ================================================================
+    h2("8. Raw Snapshot Data")
     # ================================================================
 
     if decision_snaps:
@@ -439,7 +493,7 @@ def generate_report(db_path: str = PAPER_DB_PATH) -> str:
         table(close_headers, close_rows)
 
     # ================================================================
-    h2("8. Claude Analysis Prompt")
+    h2("9. Claude Analysis Prompt")
     # ================================================================
 
     p("Copy this entire report and paste it into Claude with the following prompt:\n")
