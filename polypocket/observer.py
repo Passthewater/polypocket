@@ -175,7 +175,11 @@ def compute_model_p_up_v2(
     )
     raw = 1.0 / (1.0 + exp(-logit))
 
-    return _isotonic_apply(raw, coefs["isotonic_x"], coefs["isotonic_y"])
+    iso_x = coefs.get("isotonic_x")
+    iso_y = coefs.get("isotonic_y")
+    if iso_x is None or iso_y is None:
+        return raw
+    return _isotonic_apply(raw, iso_x, iso_y)
 
 
 def compute_model_p_up_active(

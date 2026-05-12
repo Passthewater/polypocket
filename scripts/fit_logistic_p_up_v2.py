@@ -402,6 +402,9 @@ def main() -> int:
     ap.add_argument("--out-report", default="scripts/_model_v2_training.md")
     ap.add_argument("--no-write", action="store_true",
                     help="Skip writing coefs JSON / report. Print to stdout only.")
+    ap.add_argument("--no-isotonic", action="store_true",
+                    help="Skip isotonic calibration; ship raw logistic. Pins C=10 "
+                         "for stability. Persists isotonic_x/y as null.")
     args = ap.parse_args()
 
     np.random.seed(SEED)
@@ -420,20 +423,18 @@ def main() -> int:
         print("# v2 logistic p_up training report (#15)")
         print(f"_seed={SEED}; sklearn LogisticRegression L2; TimeSeriesSplit n_splits=5_")
         print()
-        print("> **Ship decision: USER OVERRIDE.** The plan's Step-6 gate fails on two")
-        print("> small-n / lucky-v1 artifacts on the held-out (0.50-0.60 bin small-n;")
-        print("> 0.80+ comparator vs an unusually-calibrated v1 slice). Across all three")
-        print("> splits v2 wins log-loss decisively (held-out: v2=0.367 vs v1=0.443).")
-        print("> The structural #13 bug -- 0.80+ predicting 88% / actual 57% on n=7 in")
-        print("> v1 history -- is fixed in v2 (n=213 across train+held; gap 0.005-0.021).")
-        print("> The EV sim's veto runs on a 2.5-day held-out under a paper-perfect-fill")
-        print("> sim that is missing session-cap modelling (gap reconciled: sim's v1 hits")
-        print("> 82% WR vs recorded paper bot's 70% WR over the same window because the")
-        print("> sim fires on rows the live bot's LIVE_MAX_TRADES_PER_SESSION cap skipped).")
-        print(">")
-        print("> v2 ships behind MODEL_VERSION env var; v1 path stays reachable for")
-        print("> rollback. Real arbiter is the paper A/B in Task 7 once dual-logging")
-        print("> has accumulated enough rows.")
+        if args.no_isotonic:
+            print("> **No-isotonic shipping config.** Earlier with-iso fit on a smaller")
+            print("> corpus (n=3576) passed log-loss but failed the calibration gate due to")
+            print("> isotonic overfitting on the cal slice; on the refreshed corpus (n=4461)")
+            print("> the iso step pushed held-out log-loss from 0.451 (no-iso) to 0.629.")
+            print("> The raw logistic is well-calibrated; the iso safety net was the bug.")
+            print("> Pinned C=10 for stability (prior CV: C=10 and C=100 were tied to 1e-4).")
+            print(">")
+            print("> v2 ships behind MODEL_VERSION env var; v1 path stays reachable for")
+            print("> rollback.")
+        else:
+            print("> **With-isotonic shipping config.**")
         print()
 
         # ------ Step 1: load + split ------
@@ -457,9 +458,19 @@ def main() -> int:
         X_cal = make_features(cal); y_cal = cal.outcome_int.values
         X_held = make_features(held); y_held = held.outcome_int.values
 
-        # ------ Steps 3-4: CV + fit + isotonic ------
-        print("\n## CV log-loss across L2 strength (4-feature default + isotonic)")
-        primary, primary_cv = fit_one(X_train, y_train, X_cal, y_cal, with_isotonic=True)
+        # ------ Steps 3-4: CV + fit (+ optional isotonic) ------
+        iso_label = "no-iso, C=10 pinned" if args.no_isotonic else "4-core + iso"
+        print(f"\n## CV log-loss across L2 strength (4-feature default; {iso_label})")
+        if args.no_isotonic:
+            # Pin C=10: prior CV showed C=10 / C=100 essentially tied (logloss
+            # delta ~1e-4), and tighter regularization is more stable once the
+            # iso safety net is gone.
+            primary, primary_cv = fit_one(
+                X_train, y_train, X_cal, y_cal,
+                with_isotonic=False, C_grid=(10.0,),
+            )
+        else:
+            primary, primary_cv = fit_one(X_train, y_train, X_cal, y_cal, with_isotonic=True)
         for C, (m, s) in primary_cv.items():
             marker = " <- chosen" if C == primary.C else ""
             print(f"  C={C:>6}: mean_logloss={m:.4f}  std={s:.4f}{marker}")
@@ -472,7 +483,7 @@ def main() -> int:
 
         # ------ Step 6: reliability + gate ------
         print("\n## Reliability (held-out)")
-        v2_rel = reliability_table(p2_held, y_held, "v2 (4-core + iso)", rng_seed=SEED)
+        v2_rel = reliability_table(p2_held, y_held, f"v2 ({iso_label})", rng_seed=SEED)
         v1_rel = reliability_table(p1_held, y_held, "v1 (current shrinkage)",
                                    rng_seed=SEED + 1)
 
@@ -498,7 +509,7 @@ def main() -> int:
         # ------ Step 8: ablations ------
         print("\n## Ablations (held-out)")
         ll_primary = log_loss(y_held, p2_held, labels=[0, 1])
-        print(f"  primary (4-core + iso): log_loss={ll_primary:.4f}  C={primary.C}")
+        print(f"  primary ({iso_label}): log_loss={ll_primary:.4f}  C={primary.C}")
 
         # (a) engineered features in
         X_train_eng = make_features(train, include_engineered=True)
@@ -555,12 +566,13 @@ def main() -> int:
               f"delta={np.mean(per_fold_scores) - global_scaler_score:+.4f}")
 
         # ------ Decide shipping configuration ------
-        primary_choice = "4-core+iso"
+        primary_choice = "4-core+no-iso" if args.no_isotonic else "4-core+iso"
         ship_p_held = p2_held
         ship_fit = primary
 
-        # (a) include engineered if log_loss improves >= 0.005 AND gate passes
-        if (ll_primary - ll_eng) >= 0.005 and eng_gate_ok:
+        # (a) include engineered if log_loss improves >= 0.005 AND gate passes.
+        # Skipped under --no-isotonic since engineered branch is fit with iso.
+        if not args.no_isotonic and (ll_primary - ll_eng) >= 0.005 and eng_gate_ok:
             primary_choice = "4-core+spread+z*market+iso"
             ship_p_held = p_eng
             ship_fit = eng_fit
@@ -568,8 +580,7 @@ def main() -> int:
                   f"(engineered features lifted log-loss by "
                   f"{ll_primary - ll_eng:+.4f})")
         else:
-            print(f"\n  >> shipping config: {primary_choice} "
-                  f"(engineered did not lift by >=0.005 on held-out, or gate failed)")
+            print(f"\n  >> shipping config: {primary_choice}")
 
         # (c) blend escalation
         if (ll_primary - ll_blend) >= 0.005:
@@ -584,10 +595,10 @@ def main() -> int:
         except Exception:
             git_sha = "unknown"
 
-        # Use the *shipping* fit for the persisted artifact.
-        X_train_for_ship = make_features(
-            train, include_engineered=(primary_choice != "4-core+iso")
-        )
+        # Use the *shipping* fit for the persisted artifact. Engineered
+        # features only enter the hull when the engineered config was chosen.
+        engineered_chosen = primary_choice.startswith("4-core+spread")
+        X_train_for_ship = make_features(train, include_engineered=engineered_chosen)
 
         payload = {
             "model_version": "v2",
