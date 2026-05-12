@@ -15,3 +15,6 @@ reports/
 _bmad/
 corpus.parquet
 corpus*.parquet
+
+# PnL attribution local baseline (captured at Task 0; never committed).
+.attrib_baseline.txt

@@ -1118,3 +1118,17 @@ def test_reconcile_writes_unknown_event_preserves_local_status():
     payload = json.loads(events[0]["payload_json"])
     assert payload["clob_status_raw"] == "weird-new-state"
     os.unlink(db_path)
+
+
+def test_execute_paper_trade_persists_signal_reference_price(tmp_path):
+    """Paper executor persists signal.signal_reference_price + source='live'."""
+    db = str(tmp_path / "p.db")
+    init_db(db)
+    sig = Signal(side="up", model_p_up=0.72, market_price=0.55, edge=0.12,
+                 up_edge=0.12, down_edge=0.0, signal_reference_price=0.60)
+    res = execute_paper_trade(db, sig, entry_price=0.60, size=10.0,
+                              window_slug="w1", outcome="up")
+    assert res.success
+    row = find_trade_by_window_slug(db, "w1")
+    assert row["signal_reference_price"] == pytest.approx(0.60, abs=1e-9)
+    assert row["signal_reference_source"] == "live"
