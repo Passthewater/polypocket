@@ -33,11 +33,11 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import (
-    ApiCreds, AssetType, BalanceAllowanceParams, OrderArgs, OrderType,
+from py_clob_client_v2 import (
+    ApiCreds, AssetType, BalanceAllowanceParams, ClobClient,
+    MarketOrderArgs, OrderType, PartialCreateOrderOptions, Side,
+    SignatureTypeV2,
 )
-from py_clob_client.order_builder.constants import BUY
 
 
 def main() -> None:
@@ -77,7 +77,13 @@ def main() -> None:
     print("=" * 70)
     print("Step 2 — /balance-allowance per sig_type (server-side funder lookup)")
     print("=" * 70)
-    for sig_type, label in [(0, "EOA"), (1, "POLY_PROXY"), (2, "POLY_GNOSIS_SAFE")]:
+    for sig_type_enum, label in [
+        (SignatureTypeV2.EOA, "EOA"),
+        (SignatureTypeV2.POLY_PROXY, "POLY_PROXY"),
+        (SignatureTypeV2.POLY_GNOSIS_SAFE, "POLY_GNOSIS_SAFE"),
+        (SignatureTypeV2.POLY_1271, "POLY_1271"),
+    ]:
+        sig_type = int(sig_type_enum)
         try:
             client = ClobClient(host=host, key=pk, chain_id=chain_id, creds=creds,
                                 signature_type=sig_type, funder=proxy)
@@ -107,23 +113,33 @@ def main() -> None:
 
     # === Step 3: tiny order probe ==========================================
     print("=" * 70)
-    print("Step 3 — Order-submit probe (sig_type=1 first, then 0 and 2)")
+    print("Step 3 — Order-submit probe (sig_type=1 first, then 0, 2, 3)")
     print("=" * 70)
-    for sig_type, label in [(1, "POLY_PROXY"), (0, "EOA"), (2, "POLY_GNOSIS_SAFE")]:
+    for sig_type_enum, label in [
+        (SignatureTypeV2.POLY_PROXY, "POLY_PROXY"),
+        (SignatureTypeV2.EOA, "EOA"),
+        (SignatureTypeV2.POLY_GNOSIS_SAFE, "POLY_GNOSIS_SAFE"),
+        (SignatureTypeV2.POLY_1271, "POLY_1271"),
+    ]:
+        sig_type = int(sig_type_enum)
         client = ClobClient(host=host, key=pk, chain_id=chain_id, creds=creds,
                             signature_type=sig_type, funder=proxy)
+        # Place a FOK at $0.01 (way below any UP/DOWN ask) — will reject
+        # unfilled but the REJECT reason tells us what the server thinks.
+        # v2: no fee_rate_bps (server-computed); Side.BUY required on args.
+        args = MarketOrderArgs(
+            token_id=token_id,
+            amount=0.05,  # $0.05 budget
+            side=Side.BUY,
+            price=0.01,
+            order_type=OrderType.FOK,
+        )
         try:
-            market = client.get_market(condition_id)
-            fee = int(market.get("taker_base_fee", 0) or 0)
-        except Exception:
-            fee = 0
-        # Place at $0.01 (way below any UP/DOWN ask) — will reject unfilled
-        # but the REJECT reason tells us what the server thinks.
-        args = OrderArgs(token_id=token_id, price=0.01, size=5.0,
-                         side=BUY, fee_rate_bps=fee)
-        try:
-            signed = client.create_order(args)
-            resp = client.post_order(signed, OrderType.FOK)
+            resp = client.create_and_post_market_order(
+                order_args=args,
+                options=PartialCreateOrderOptions(tick_size="0.01"),
+                order_type=OrderType.FOK,
+            )
             print(f"  sig_type={sig_type} ({label:16}) server resp: {resp}")
         except Exception as exc:
             print(f"  sig_type={sig_type} ({label:16}) RAISED: {type(exc).__name__}: {exc}")
