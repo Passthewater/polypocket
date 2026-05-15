@@ -10,8 +10,7 @@ be swept — this script is the one-time backfill.
 import logging
 import sqlite3
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, TradeParams
+from py_clob_client_v2 import ApiCreds, ClobClient, TradeParams
 
 from polypocket.clients.polymarket import PolymarketClient, POLY_PROXY_SIG_TYPE
 from polypocket.config import (

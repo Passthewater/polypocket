@@ -13,7 +13,7 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from py_clob_client.client import ClobClient
+from py_clob_client_v2 import ClobClient
 
 
 def main() -> None:
@@ -27,7 +27,7 @@ def main() -> None:
     chain_id = int(os.getenv("CHAIN_ID", "137"))
 
     client = ClobClient(host=host, key=private_key, chain_id=chain_id)
-    creds = client.create_or_derive_api_creds()
+    creds = client.create_or_derive_api_key()
 
     print()
     print("# Paste these into your .env:")
