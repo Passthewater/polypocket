@@ -15,11 +15,10 @@ def mock_clob():
 
 def _make_client(mock_clob_cls, dry_run=False):
     instance = mock_clob_cls.return_value
-    # Polymarket returns USDC balance in raw 6-decimal on-chain units.
+    # Polymarket returns collateral balance in raw 6-decimal on-chain units.
+    # pUSD (the v2-era collateral) is a USDC-backed ERC-20 with the same scale.
     # 1_234_500_000 raw = $1234.50.
     instance.get_balance_allowance.return_value = {"balance": "1234500000"}
-    # Default: BTC up/down markets report taker_base_fee=1000.
-    instance.get_market.return_value = {"taker_base_fee": 1000}
     return PolymarketClient(
         host="https://clob.polymarket.com", chain_id=137,
         private_key="0x" + "1" * 64,
@@ -31,8 +30,9 @@ def _make_client(mock_clob_cls, dry_run=False):
 
 def test_submit_fok_filled(mock_clob):
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {"success": True, "status": "matched", "orderID": "abc"}
+    inst.create_and_post_market_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
     inst.get_order.return_value = {"status": "matched", "size_matched": "7.0"}
 
     fill = client.submit_fok(side="up", price=0.51, size=7.0,
@@ -41,79 +41,62 @@ def test_submit_fok_filled(mock_clob):
     assert fill.status == "filled"
     assert fill.order_id == "abc"
     assert fill.filled_size == pytest.approx(7.0)
-    inst.post_order.assert_called_once()
+    inst.create_and_post_market_order.assert_called_once()
 
 
-def test_submit_fok_passes_market_fee_rate(mock_clob):
-    """MarketOrderArgs.fee_rate_bps must come from the market's taker_base_fee."""
+def test_submit_fok_passes_v2_market_order_args(mock_clob):
+    """v2 MarketOrderArgs: side=Side.BUY, order_type=FOK, no fee_rate_bps."""
+    from py_clob_client_v2 import OrderType, Side
     client, inst = _make_client(mock_clob)
-    inst.get_market.return_value = {"taker_base_fee": 1000}
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {"success": True, "status": "matched", "orderID": "abc"}
+    inst.create_and_post_market_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
     inst.get_order.return_value = {"status": "matched", "size_matched": "7.0"}
 
     client.submit_fok(side="up", price=0.51, size=7.0,
                       token_id="TKN-UP", condition_id="0xCOND")
 
-    inst.create_market_order.assert_called_once()
-    args = inst.create_market_order.call_args.args[0]
-    assert args.fee_rate_bps == 1000
+    kwargs = inst.create_and_post_market_order.call_args.kwargs
+    args = kwargs["order_args"]
     assert args.token_id == "TKN-UP"
+    assert args.side == Side.BUY
+    assert args.order_type == OrderType.FOK
     # amount = USDC budget at the target price (2-dp precision rule)
     assert args.amount == pytest.approx(round(7.0 * 0.51, 2))
     # price = limit (max) price, with FOK_SLIPPAGE_TICKS buffer so taker
     # can sweep thin levels instead of killing at the quoted ask
     from polypocket.config import FOK_SLIPPAGE_TICKS
     assert args.price == pytest.approx(round(0.51 + FOK_SLIPPAGE_TICKS * 0.01, 2))
+    # tick size passed via PartialCreateOrderOptions
+    options = kwargs["options"]
+    assert options.tick_size == "0.01"
+    # order_type also passed as top-level kwarg
+    assert kwargs["order_type"] == OrderType.FOK
+    # v2 removes fee_rate_bps from MarketOrderArgs — no such attribute or zero default
+    assert getattr(args, "fee_rate_bps", 0) == 0
 
 
 def test_submit_fok_limit_price_capped_at_99c(mock_clob):
     """Limit price must never exceed $0.99 — Polymarket rejects price==1.0."""
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {"success": True, "status": "matched", "orderID": "x"}
+    inst.create_and_post_market_order.return_value = {
+        "success": True, "status": "matched", "orderID": "x",
+    }
     inst.get_order.return_value = {"status": "matched", "size_matched": "1.0"}
 
     client.submit_fok(side="up", price=0.98, size=1.0,
                       token_id="TKN-UP", condition_id="0xCOND")
 
-    args = inst.create_market_order.call_args.args[0]
+    args = inst.create_and_post_market_order.call_args.kwargs["order_args"]
     assert args.price <= 0.99
-
-
-def test_submit_fok_caches_market_fee(mock_clob):
-    """get_market must be called only once per condition_id across submissions."""
-    client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {"success": True, "status": "matched", "orderID": "x"}
-    inst.get_order.return_value = {"status": "matched", "size_matched": "1.0"}
-
-    for _ in range(3):
-        client.submit_fok(side="up", price=0.51, size=1.0,
-                          token_id="TKN-UP", condition_id="0xCOND")
-
-    assert inst.get_market.call_count == 1
-
-
-def test_submit_fok_market_lookup_failure_uses_zero_fee(mock_clob):
-    client, inst = _make_client(mock_clob)
-    inst.get_market.side_effect = RuntimeError("market lookup down")
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {"success": True, "status": "matched", "orderID": "x"}
-    inst.get_order.return_value = {"status": "matched", "size_matched": "1.0"}
-
-    client.submit_fok(side="up", price=0.51, size=1.0,
-                      token_id="TKN-UP", condition_id="0xCOND")
-
-    args = inst.create_market_order.call_args.args[0]
-    assert args.fee_rate_bps == 0
 
 
 def test_submit_fok_success_but_unmatched_is_rejected(mock_clob):
     """FOK: `success=True, status='unmatched'` must NOT be recorded as filled."""
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {"success": True, "status": "unmatched"}
+    inst.create_and_post_market_order.return_value = {
+        "success": True, "status": "unmatched",
+    }
 
     fill = client.submit_fok(side="up", price=0.51, size=7.0,
                              token_id="TKN-UP", condition_id="0xCOND")
@@ -126,8 +109,9 @@ def test_submit_fok_success_but_unmatched_is_rejected(mock_clob):
 
 def test_submit_fok_rejected(mock_clob):
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {"success": False, "errorMsg": "not matched"}
+    inst.create_and_post_market_order.return_value = {
+        "success": False, "errorMsg": "not matched",
+    }
 
     fill = client.submit_fok(side="up", price=0.51, size=7.0,
                              token_id="TKN-UP", condition_id="0xCOND")
@@ -140,7 +124,7 @@ def test_submit_fok_rejected(mock_clob):
 
 def test_submit_fok_network_error(mock_clob):
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.side_effect = RuntimeError("boom")
+    inst.create_and_post_market_order.side_effect = RuntimeError("boom")
 
     fill = client.submit_fok(side="up", price=0.51, size=7.0,
                              token_id="TKN-UP", condition_id="0xCOND")
@@ -157,13 +141,15 @@ def test_submit_fok_dry_run_does_not_post(mock_clob):
 
     assert fill.status == "filled"
     assert fill.order_id == "DRY-RUN"
-    inst.create_market_order.assert_not_called()
-    inst.post_order.assert_not_called()
-    inst.get_market.assert_not_called()
+    inst.create_and_post_market_order.assert_not_called()
 
 
 def test_get_usdc_balance_converts_raw_units_to_dollars(mock_clob):
-    """Polymarket /balance-allowance returns 6-decimal raw units; client must divide."""
+    """Polymarket /balance-allowance returns 6-decimal raw units; client must divide.
+
+    pUSD inherits the same 6-decimal scale as USDC.e, so the conversion is
+    unchanged from the v1 era.
+    """
     client, inst = _make_client(mock_clob)
     inst.get_balance_allowance.return_value = {"balance": "42700000"}  # $42.70 raw
 
@@ -361,12 +347,29 @@ def test_get_settlement_info_dry_run_returns_zeros(mock_clob):
     inst.get_order.assert_not_called()
 
 
-def test_cancel_order_success(mock_clob):
+def test_get_settlement_info_handles_null_order_body(mock_clob):
+    """Defensive None-guard: /order may return null body during indexing lag."""
     client, inst = _make_client(mock_clob)
-    inst.cancel.return_value = {"canceled": ["abc"]}
+    inst.get_order.return_value = None
+
+    info = client.get_settlement_info("0xOID")
+
+    assert info.shares_held == 0.0
+    assert info.cost_usdc == 0.0
+    inst.get_trades.assert_not_called()
+
+
+def test_cancel_order_success(mock_clob):
+    from py_clob_client_v2 import OrderPayload
+    client, inst = _make_client(mock_clob)
+    inst.cancel_order.return_value = {"canceled": ["abc"]}
     ok = client.cancel_order("abc")
     assert ok is True
-    inst.cancel.assert_called_once_with(order_id="abc")
+    inst.cancel_order.assert_called_once()
+    # v2 cancel_order takes OrderPayload(orderID=...) positionally
+    payload = inst.cancel_order.call_args.args[0]
+    assert isinstance(payload, OrderPayload)
+    assert payload.orderID == "abc"
 
 
 def test_cancel_order_dry_run(mock_clob):
@@ -377,29 +380,27 @@ def test_cancel_order_dry_run(mock_clob):
 
 def test_cancel_order_retries_then_succeeds(mock_clob):
     client, inst = _make_client(mock_clob)
-    inst.cancel.side_effect = [Exception("transient"), {"canceled": ["abc"]}]
+    inst.cancel_order.side_effect = [Exception("transient"), {"canceled": ["abc"]}]
     ok = client.cancel_order("abc")
     assert ok is True
-    assert inst.cancel.call_count == 2
+    assert inst.cancel_order.call_count == 2
 
 
 def test_cancel_order_gives_up_after_retries(mock_clob):
     client, inst = _make_client(mock_clob)
-    inst.cancel.side_effect = Exception("persistent")
+    inst.cancel_order.side_effect = Exception("persistent")
     ok = client.cancel_order("abc")
     assert ok is False
-    assert inst.cancel.call_count == 3  # 1 + 2 retries (CANCEL_RETRY_MAX=2)
+    assert inst.cancel_order.call_count == 3  # 1 + 2 retries (CANCEL_RETRY_MAX=2)
 
 
 def test_submit_ioc_full_match(mock_clob):
+    """FAK fully fills: server-side cancel-remainder is a no-op; /trades has the fill."""
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {
+    inst.create_and_post_market_order.return_value = {
         "success": True, "status": "matched", "orderID": "abc",
     }
-    # get_order returns fully-matched (size_matched == size)
     inst.get_order.return_value = {
-        "size_matched": "7.0",
         "associate_trades": ["t1"],
     }
     inst.get_trades.return_value = [
@@ -414,25 +415,24 @@ def test_submit_ioc_full_match(mock_clob):
     assert fill.order_id == "abc"
     # shares_held = 7.0 * (1 - 0.10) = 6.3
     assert fill.filled_size == pytest.approx(6.3, abs=0.001)
-    inst.cancel.assert_not_called()
+    # avg_price = cost / shares = (7.0 * 0.51) / 6.3 ≈ 0.5667
+    assert fill.avg_price == pytest.approx(0.5667, abs=0.001)
+    # v2 FAK cancels remainder server-side; we never call cancel_order from submit_ioc
+    inst.cancel_order.assert_not_called()
 
 
 def test_submit_ioc_partial_match(mock_clob):
+    """FAK partial fill: only 3 of 7 shares matched; /trades reflects the partial."""
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    # Server says "matched" but get_order shows a smaller size_matched than
-    # we asked for — realistic response when only part of the book crossed.
-    inst.post_order.return_value = {
+    inst.create_and_post_market_order.return_value = {
         "success": True, "status": "matched", "orderID": "abc",
     }
     inst.get_order.return_value = {
-        "size_matched": "3.0",
         "associate_trades": ["t1"],
     }
     inst.get_trades.return_value = [
         {"taker_order_id": "abc", "size": "3.0", "price": "0.51", "fee_rate_bps": 1000},
     ]
-    inst.cancel.return_value = {"canceled": ["abc"]}
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
                              token_id="TKN-UP", condition_id="0xCOND",
@@ -441,140 +441,32 @@ def test_submit_ioc_partial_match(mock_clob):
     assert fill.status == "filled"
     assert fill.order_id == "abc"
     assert fill.filled_size == pytest.approx(2.7, abs=0.001)  # 3.0 * 0.9
-    # avg_price = cost_usdc / shares_held = (3.0 * 0.51) / (3.0 * 0.9) ≈ 0.5667
     assert fill.avg_price == pytest.approx(0.5667, abs=0.001)
-    inst.cancel.assert_called_once_with(order_id="abc")
+    inst.cancel_order.assert_not_called()
 
 
 def test_submit_ioc_no_match_returns_rejected(mock_clob):
+    """FAK with zero matches: server returns success but /trades is empty → fak-no-fill."""
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {
-        "success": True, "status": "unmatched", "orderID": "abc",
+    inst.create_and_post_market_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
     }
-    inst.get_order.return_value = {"size_matched": "0", "associate_trades": []}
-    inst.cancel.return_value = {"canceled": ["abc"]}
+    inst.get_order.return_value = {"associate_trades": []}
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
                              token_id="TKN-UP", condition_id="0xCOND",
                              limit_price=0.57)
 
     assert fill.status == "rejected"
-    assert fill.error == "gtc-no-fill"
+    assert fill.error == "fak-no-fill"
     assert fill.filled_size == 0.0
-    assert fill.order_id == "abc"  # persisted for reconciler
-    inst.cancel.assert_called_once()
-    # Fast path: no /trades lookup when nothing matched.
-    inst.get_trades.assert_not_called()
-
-
-def test_submit_ioc_no_match_skips_settlement_even_if_order_returns_none(mock_clob):
-    """size_matched=0 + null /order body must still return gtc-no-fill (not error).
-
-    Historically this produced `settlement-lookup: 'NoneType' object has no
-    attribute 'get'` — the fast-path now sidesteps the /trades lookup when
-    nothing matched, eliminating that race.
-    """
-    client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {
-        "success": True, "status": "unmatched", "orderID": "abc",
-    }
-    # First get_order: returns None (server hasn't indexed order yet).
-    inst.get_order.return_value = None
-    inst.cancel.return_value = {"canceled": ["abc"]}
-
-    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND",
-                             limit_price=0.57)
-
-    assert fill.status == "rejected"
-    assert fill.error == "gtc-no-fill"
-    assert fill.order_id == "abc"
-    inst.get_trades.assert_not_called()
-
-
-def test_submit_ioc_settlement_failure_falls_back_to_estimate(mock_clob):
-    """When size_matched>0 and /trades lookup fails, the bot must not drop the
-    fill. Prior behavior returned `status=error` which stranded the position
-    under the rejected row; new behavior logs loudly and falls back to a
-    pessimistic estimate (shares = size_matched × (1 − fee), cost = limit)."""
-    client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {
-        "success": True, "status": "matched", "orderID": "abc",
-    }
-    # First get_order: matched partially. Second get_order (inside
-    # get_settlement_info): server hiccup.
-    inst.get_order.side_effect = [
-        {"size_matched": "7.0"},   # first call: check fully_matched
-        RuntimeError("CLOB 500"),  # second call: inside get_settlement_info
-    ]
-
-    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND",
-                             limit_price=0.57)
-
-    # taker_base_fee=1000 bps -> estimate shares = 7.0 * (1 - 0.10) = 6.3
-    assert fill.status == "filled"
-    assert fill.order_id == "abc"
-    assert fill.filled_size == pytest.approx(6.3, abs=0.001)
-    assert fill.avg_price == pytest.approx(0.57)  # limit_price as pessimistic cost proxy
-    assert fill.error is None
-
-
-def test_submit_ioc_settlement_returns_none_body_falls_back_to_estimate(mock_clob):
-    """Same path as above but via the None-guard: get_settlement_info's own
-    get_order returns None → zero SettlementInfo → submit_ioc sees
-    info.shares_held=0 with size_matched>0 and falls back to estimate."""
-    client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {
-        "success": True, "status": "matched", "orderID": "abc",
-    }
-    inst.get_order.side_effect = [
-        {"size_matched": "7.0"},   # first call: check fully_matched
-        None,                      # second call: null body
-    ]
-
-    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND",
-                             limit_price=0.57)
-
-    assert fill.status == "filled"
-    assert fill.order_id == "abc"
-    assert fill.filled_size == pytest.approx(6.3, abs=0.001)
-
-
-def test_get_settlement_info_handles_null_order_body(mock_clob):
-    """Bare None-guard test on get_settlement_info itself."""
-    client, inst = _make_client(mock_clob)
-    inst.get_order.return_value = None
-
-    info = client.get_settlement_info("0xOID")
-
-    assert info.shares_held == 0.0
-    assert info.cost_usdc == 0.0
-    inst.get_trades.assert_not_called()
-
-
-def test_submit_ioc_post_raises_returns_error(mock_clob):
-    client, inst = _make_client(mock_clob)
-    inst.create_market_order.side_effect = Exception("network down")
-
-    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND",
-                             limit_price=0.57)
-
-    assert fill.status == "error"
-    assert "network" in fill.error
-    inst.cancel.assert_not_called()
+    assert fill.order_id == "abc"  # persisted for the reconciler
+    inst.cancel_order.assert_not_called()
 
 
 def test_submit_ioc_success_false_is_rejected(mock_clob):
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {
+    inst.create_and_post_market_order.return_value = {
         "success": False, "errorMsg": "fee mismatch",
     }
 
@@ -584,30 +476,42 @@ def test_submit_ioc_success_false_is_rejected(mock_clob):
 
     assert fill.status == "rejected"
     assert "fee mismatch" in fill.error
-    inst.cancel.assert_not_called()
+    inst.cancel_order.assert_not_called()
 
 
-def test_submit_ioc_cancel_fails_still_returns_fill(mock_clob):
+def test_submit_ioc_post_raises_returns_error(mock_clob):
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {
-        "success": True, "status": "matched", "orderID": "abc",
-    }
-    inst.get_order.return_value = {
-        "size_matched": "3.0", "associate_trades": ["t1"],
-    }
-    inst.get_trades.return_value = [
-        {"taker_order_id": "abc", "size": "3.0", "price": "0.51", "fee_rate_bps": 1000},
-    ]
-    inst.cancel.side_effect = Exception("persistent")
+    inst.create_and_post_market_order.side_effect = Exception("network down")
 
     fill = client.submit_ioc(side="up", price=0.51, size=7.0,
                              token_id="TKN-UP", condition_id="0xCOND",
                              limit_price=0.57)
 
-    # Cancel failure is logged but doesn't flip success — we have a real fill.
-    assert fill.status == "filled"
-    assert fill.filled_size == pytest.approx(2.7, abs=0.001)
+    assert fill.status == "error"
+    assert "network" in fill.error
+    inst.cancel_order.assert_not_called()
+
+
+def test_submit_ioc_settlement_lookup_failure_is_rejected(mock_clob):
+    """v2: if get_settlement_info raises, treat as rejected with a clear error.
+
+    v1's degraded-fallback estimate path is gone — without `/trades` data we
+    can't compute real cost, and v2's native FAK means there's no GTC-then-cancel
+    race window where we'd need to guess.
+    """
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_market_order.return_value = {
+        "success": True, "status": "matched", "orderID": "abc",
+    }
+    inst.get_order.side_effect = RuntimeError("CLOB 500")
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
+
+    assert fill.status == "rejected"
+    assert fill.order_id == "abc"
+    assert "settlement-lookup" in fill.error
 
 
 def test_submit_ioc_dry_run(mock_clob):
@@ -621,24 +525,28 @@ def test_submit_ioc_dry_run(mock_clob):
 
 def test_submit_ioc_uses_explicit_limit_price(mock_clob):
     """submit_ioc must post at the caller-supplied limit_price, not fok_limit_price(price)."""
+    from py_clob_client_v2 import OrderType, Side
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {
+    inst.create_and_post_market_order.return_value = {
         "success": True, "status": "matched", "orderID": "abc",
     }
-    inst.get_order.return_value = {"size_matched": "7.0", "associate_trades": []}
+    inst.get_order.return_value = {"associate_trades": []}
 
     # price=0.51, limit_price=0.42 (below same-side ask — pair-merge scenario)
     client.submit_ioc(side="up", price=0.51, size=7.0,
                       token_id="TKN-UP", condition_id="0xCOND",
                       limit_price=0.42)
 
-    args = inst.create_market_order.call_args.args[0]
+    kwargs = inst.create_and_post_market_order.call_args.kwargs
+    args = kwargs["order_args"]
     assert args.price == pytest.approx(0.42)
-    # amount is now anchored to limit_price (not price) since the server
-    # reconstructs taker = amount/limit, and that ratio must land on tick grid.
+    assert args.side == Side.BUY
+    assert args.order_type == OrderType.FAK
+    # amount is anchored to limit_price since the server reconstructs taker
+    # = amount/limit, and that ratio must land on the tick grid.
     # size_int = 7 is tick-safe for limit=0.42 (7*0.42=2.94, scaled 294.0 clean).
     assert args.amount == pytest.approx(round(7 * 0.42, 2))
+    assert kwargs["order_type"] == OrderType.FAK
 
 
 def test_tick_safe_size_picks_target_when_clean():
@@ -673,7 +581,6 @@ def test_tick_safe_size_handles_known_failing_trade_45():
     import math
     result = _tick_safe_size(12, 0.38)
     assert result is not None
-    # The returned size must survive the actual py_clob_client round_down path.
     amount = round(result * 0.38, 2)
     scaled = amount * 100
     assert math.floor(scaled) == round(scaled), (
@@ -681,68 +588,21 @@ def test_tick_safe_size_handles_known_failing_trade_45():
     )
 
 
-def test_tick_safe_size_reconstructed_ratio_is_clean_through_real_lib():
-    """End-to-end invariant: for any (size, limit) _tick_safe_size approves,
-    the real py_clob_client.get_market_order_amounts must produce a
-    maker_wei/taker_wei ratio that's a clean multiple of 0.01 — that's what
-    the server's tick-size rule actually checks. Runs for the concrete
-    historical failing pairs plus a dense sweep of the (limit, size) space
-    relevant to 5m BTC markets.
-    """
-    from py_clob_client.order_builder.builder import OrderBuilder, ROUNDING_CONFIG
-    from py_clob_client.signer import Signer
-
-    # A real OrderBuilder needs a signer and chain id, but get_market_order_amounts
-    # is purely arithmetic on its args — we just need the method.
-    signer = Signer(private_key="0x" + "1" * 64, chain_id=137)
-    builder = OrderBuilder(signer=signer, sig_type=1, funder="0x" + "2" * 40)
-    # BTC up/down markets use 0.01 ticks.
-    round_config = ROUNDING_CONFIG["0.01"]
-
-    # Historical failing cases + dense regression sweep.
-    historical = [(12, 0.38), (7, 0.58), (10, 0.67)]
-    sweep = [
-        (s, round(limit_cents / 100.0, 2))
-        for limit_cents in range(5, 95)
-        for s in range(1, 40)
-    ]
-
-    for (target_size, limit) in historical + sweep:
-        approved = _tick_safe_size(target_size, limit)
-        if approved is None:
-            # Unfixable by search window — acceptable; submit_ioc skips these.
-            continue
-        amount = round(approved * limit, 2)
-        maker_wei, taker_wei = builder.get_market_order_amounts(
-            amount, limit, round_config,
-        )
-        if taker_wei == 0:
-            continue
-        ratio = maker_wei / taker_wei
-        ratio_cents = round(ratio * 100)
-        assert abs(ratio - ratio_cents / 100) < 1e-9, (
-            f"server-side tick violation: size={approved} limit={limit} "
-            f"amount={amount} maker_wei={maker_wei} taker_wei={taker_wei} "
-            f"ratio={ratio!r}"
-        )
-
-
 def test_submit_ioc_quantizes_to_tick_safe_size(mock_clob):
-    """submit_ioc must submit an amount whose size*limit survives py_clob_client's round_down."""
+    """submit_ioc must submit an amount whose size*limit survives any round_down step."""
     import math
     client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {
+    inst.create_and_post_market_order.return_value = {
         "success": True, "status": "matched", "orderID": "abc",
     }
-    inst.get_order.return_value = {"size_matched": "9.0", "associate_trades": []}
+    inst.get_order.return_value = {"associate_trades": []}
 
     # Real failing case: size=7.49, limit=0.58 → raw ratio lands off-grid.
     client.submit_ioc(side="up", price=0.51, size=7.49,
                       token_id="TKN-UP", condition_id="0xCOND",
                       limit_price=0.58)
 
-    args = inst.create_market_order.call_args.args[0]
+    args = inst.create_and_post_market_order.call_args.kwargs["order_args"]
     scaled = args.amount * 100
     # Core invariant: floor-scaled amount equals round-scaled (no drift).
     assert math.floor(scaled) == round(scaled), (
@@ -754,39 +614,10 @@ def test_submit_ioc_quantizes_to_tick_safe_size(mock_clob):
     assert round(ratio) >= 1
 
 
-def test_submit_ioc_full_match_with_rounding_tolerance(mock_clob):
-    """size_matched=6.995 vs size=7.0: within 0.01 cents so treated as fully matched.
-
-    Server-side fee rounding can produce a floor-rounded size_matched that's
-    off by < 0.01 shares; must skip cancel (server rejects cancel of filled).
-    """
-    client, inst = _make_client(mock_clob)
-    inst.create_market_order.return_value = MagicMock()
-    inst.post_order.return_value = {
-        "success": True, "status": "matched", "orderID": "abc",
-    }
-    # size_matched is 0.005 short of 7.0 — within the 0.01 tolerance
-    inst.get_order.return_value = {
-        "size_matched": "6.995",
-        "associate_trades": ["t1"],
-    }
-    inst.get_trades.return_value = [
-        {"taker_order_id": "abc", "size": "6.995", "price": "0.51", "fee_rate_bps": 1000},
-    ]
-
-    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
-                             token_id="TKN-UP", condition_id="0xCOND",
-                             limit_price=0.57)
-
-    assert fill.status == "filled"
-    inst.cancel.assert_not_called()
-
-
 def test_polymarket_client_satisfies_live_order_client_protocol():
-    """Protocol drift guard. If a future change renames an argument on
+    """Protocol drift guard. If a future change renames a method on
     PolymarketClient without updating the executor's Protocol or call sites,
-    this test catches it at import time. Phase 4's changes sit in
-    executor.py but the client's call signatures are the hot seam."""
+    this test catches it at import time."""
     for method in (
         "submit_fok", "submit_ioc", "cancel_order",
         "get_usdc_balance", "get_settlement_info", "get_order_status",
