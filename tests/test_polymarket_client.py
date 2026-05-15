@@ -133,6 +133,49 @@ def test_submit_fok_network_error(mock_clob):
     assert "boom" in fill.error
 
 
+def test_submit_fok_no_match_400_classified_as_rejected(mock_clob):
+    """v2 server raises PolyApiException(status=400) when FOK finds no match,
+    even though the body carries a real orderID. Must surface as a clean
+    `fok-no-fill` rejection with the orderID preserved (not as `status=error`).
+    """
+    from py_clob_client_v2.exceptions import PolyApiException
+    client, inst = _make_client(mock_clob)
+    exc = PolyApiException.__new__(PolyApiException)
+    exc.status_code = 400
+    exc.error_msg = {
+        "error": "no orders found to match with FOK order. FOK requires immediate full fill.",
+        "orderID": "0xABCDEF",
+    }
+    inst.create_and_post_market_order.side_effect = exc
+
+    fill = client.submit_fok(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND")
+
+    assert fill.status == "rejected"
+    assert fill.error == "fok-no-fill"
+    assert fill.order_id == "0xABCDEF"  # preserved for the reconciler
+    assert fill.filled_size == 0.0
+
+
+def test_submit_fok_other_400_still_errors(mock_clob):
+    """A 400 that's not a no-match (e.g., insufficient balance) must still
+    fall through to the generic network error path — we don't want to mask
+    real failures as no-fills."""
+    from py_clob_client_v2.exceptions import PolyApiException
+    client, inst = _make_client(mock_clob)
+    exc = PolyApiException.__new__(PolyApiException)
+    exc.status_code = 400
+    exc.error_msg = {"error": "not enough balance / allowance"}
+    inst.create_and_post_market_order.side_effect = exc
+
+    fill = client.submit_fok(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND")
+
+    assert fill.status == "error"
+    assert "network:" in fill.error
+    assert "balance" in fill.error
+
+
 def test_submit_fok_dry_run_does_not_post(mock_clob):
     client, inst = _make_client(mock_clob, dry_run=True)
 
@@ -490,6 +533,54 @@ def test_submit_ioc_post_raises_returns_error(mock_clob):
     assert fill.status == "error"
     assert "network" in fill.error
     inst.cancel_order.assert_not_called()
+
+
+def test_submit_ioc_no_match_400_classified_as_rejected(mock_clob):
+    """v2 server raises PolyApiException(status=400) when FAK finds no match.
+    Real-world example from 2026-05-15 live session — must surface as
+    `fak-no-fill` with orderID preserved (not as `status=error`).
+    """
+    from py_clob_client_v2.exceptions import PolyApiException
+    client, inst = _make_client(mock_clob)
+    exc = PolyApiException.__new__(PolyApiException)
+    exc.status_code = 400
+    exc.error_msg = {
+        "error": ("no orders found to match with FAK order. FAK orders "
+                  "are partially filled or killed if no match is found."),
+        "orderID": "0xea9b4792d52161bc",
+    }
+    inst.create_and_post_market_order.side_effect = exc
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
+
+    assert fill.status == "rejected"
+    assert fill.error == "fak-no-fill"
+    assert fill.order_id == "0xea9b4792d52161bc"
+    assert fill.filled_size == 0.0
+    inst.cancel_order.assert_not_called()
+
+
+def test_submit_ioc_no_match_with_empty_order_id(mock_clob):
+    """Defensive: if the 400 body somehow omits orderID, treat order_id=None
+    (not the empty string) so executor doesn't write a bogus link."""
+    from py_clob_client_v2.exceptions import PolyApiException
+    client, inst = _make_client(mock_clob)
+    exc = PolyApiException.__new__(PolyApiException)
+    exc.status_code = 400
+    exc.error_msg = {
+        "error": "no orders found to match with FAK order.",
+    }
+    inst.create_and_post_market_order.side_effect = exc
+
+    fill = client.submit_ioc(side="up", price=0.51, size=7.0,
+                             token_id="TKN-UP", condition_id="0xCOND",
+                             limit_price=0.57)
+
+    assert fill.status == "rejected"
+    assert fill.error == "fak-no-fill"
+    assert fill.order_id is None
 
 
 def test_submit_ioc_settlement_lookup_failure_is_rejected(mock_clob):
