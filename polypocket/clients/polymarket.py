@@ -17,6 +17,7 @@ from py_clob_client_v2 import (
     SignatureTypeV2,
     TradeParams,
 )
+from py_clob_client_v2.exceptions import PolyApiException
 
 from polypocket.config import FOK_SLIPPAGE_TICKS
 from polypocket.executor import FillResult, SettlementInfo
@@ -39,6 +40,32 @@ TICK_SIZE = "0.01"
 
 CANCEL_RETRY_MAX = 2
 CANCEL_RETRY_BACKOFF_S = 0.25
+
+
+def _classify_no_match_error(exc: Exception) -> tuple[str, str] | None:
+    """If `exc` is a v2-server no-match rejection, return (order_id, label).
+
+    Polymarket's v2 CLOB raises HTTP 400 (as a `PolyApiException`) for the
+    common case where a FOK/FAK order signs and reaches the matching engine
+    but finds no counterparty at the limit price — instead of returning a
+    normal `success: false` response body. The 400 body still carries a
+    real `orderID` we want to preserve for the reconciler.
+
+    Returns `(order_id, "fak-no-fill"|"fok-no-fill")` if the exception
+    matches that pattern, else None (caller falls back to the generic
+    `network:` error path).
+    """
+    if not isinstance(exc, PolyApiException) or exc.status_code != 400:
+        return None
+    body = exc.error_msg
+    if not isinstance(body, dict):
+        return None
+    err = (body.get("error") or "").lower()
+    if "no orders found to match" not in err:
+        return None
+    order_id = body.get("orderID") or ""
+    label = "fak-no-fill" if "fak" in err else "fok-no-fill"
+    return order_id, label
 
 
 def fok_limit_price(price: float) -> float:
@@ -153,6 +180,13 @@ class PolymarketClient:
                 order_type=OrderType.FOK,
             )
         except Exception as exc:
+            no_match = _classify_no_match_error(exc)
+            if no_match is not None:
+                order_id, label = no_match
+                return FillResult(
+                    status="rejected", order_id=order_id or None,
+                    filled_size=0.0, avg_price=None, error=label,
+                )
             log.exception("submit_fok network/signing error")
             return FillResult(
                 status="error", order_id=None, filled_size=0.0,
@@ -231,6 +265,13 @@ class PolymarketClient:
                 order_type=OrderType.FAK,
             )
         except Exception as exc:
+            no_match = _classify_no_match_error(exc)
+            if no_match is not None:
+                order_id, label = no_match
+                return FillResult(
+                    status="rejected", order_id=order_id or None,
+                    filled_size=0.0, avg_price=None, error=label,
+                )
             log.exception("submit_ioc network/signing error")
             return FillResult(
                 status="error", order_id=None, filled_size=0.0,
