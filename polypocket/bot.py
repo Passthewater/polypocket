@@ -12,12 +12,16 @@ from polypocket.config import (
     DEPTH_CLAMP_BUFFER,
     EDGE_FLOOR,
     EDGE_RANGE,
+    ENTRY_MODE,
     IOC_BUFFER_TICKS,
     MAX_BOOK_AGE_S,
     MAX_POSITION_USDC,
     MIN_FILL_RATIO,
     MIN_POSITION_USDC,
     PAPER_DB_PATH,
+    POST_ONLY_CANCEL_AT_T_REMAINING_S,
+    POST_ONLY_EXPIRY_SAFETY_BUFFER_S,
+    POST_ONLY_REST_OFFSET_TICKS,
     TRADING_MODE,
     VOL_FLOOR,
     VOL_RANGE,
@@ -29,7 +33,9 @@ from polypocket.clients.polymarket import ioc_limit_price
 from polypocket.executor import (
     LiveOrderClient,
     TradeResult,
+    cancel_post_only_order,
     execute_live_trade,
+    execute_live_trade_post_only,
     execute_paper_trade,
     reconcile_recovered_trade,
     settle_live_trade,
@@ -134,6 +140,8 @@ class Bot:
         position = f'{trade["size"]:.1f} {trade["side"].upper()} @ ${trade["entry_price"]:.3f}'
         if trade.get("mode") == "live" and trade.get("status") == "reserved":
             return f"{position} (reserved)"
+        if trade.get("mode") == "live" and trade.get("status") == "placed":
+            return f"{position} (resting)"
         return position
 
     async def _on_book_update(self, window: Window, side: str) -> None:
@@ -233,8 +241,11 @@ class Bot:
                 # covers the stranded-fill sweep — the reconciler checks if
                 # anything actually matched on-chain for rejected rows that
                 # still carry an external_order_id, and promotes them.
+                # 'placed' covers a post-only resting order that survived a
+                # restart — the reconciler cancels it inline.
                 recoverable_statuses.add("reserved")
                 recoverable_statuses.add("rejected")
+                recoverable_statuses.add("placed")
             if recovered_trade is not None and recovered_trade["status"] in recoverable_statuses:
                 final_status = recovered_trade["status"]
                 if TRADING_MODE == "live" and recovered_trade.get("external_order_id"):
@@ -321,6 +332,44 @@ class Bot:
                 )
                 if self.on_stats_update:
                     self.on_stats_update(self.stats)
+
+        # Post-only cancel-on-tick: if a resting maker order is approaching
+        # the no-trade band at window-end, cancel-and-reconcile so the order
+        # doesn't fill into the dead-zone. Server-side `expiration` is the
+        # safety net; this fast-path runs as soon as the bot sees a book
+        # event within the threshold.
+        if (
+            TRADING_MODE != "paper"
+            and self._open_trade is not None
+            and self._open_trade.get("status") == "placed"
+            and self._current_window is not None
+            and (self._current_window.end_time - now) <= POST_ONLY_CANCEL_AT_T_REMAINING_S
+            and self.live_order_client is not None
+        ):
+            trade_row = find_trade_by_window_slug(self.db_path, self._current_window.slug)
+            if trade_row is not None and trade_row.get("status") == "placed":
+                final = cancel_post_only_order(
+                    self.db_path, trade_row, self.live_order_client,
+                    trigger="window-close",
+                )
+                if final == "open":
+                    updated = find_trade_by_window_slug(
+                        self.db_path, self._current_window.slug,
+                    )
+                    self._open_trade = {
+                        "trade_id": updated["id"],
+                        "side": updated["side"],
+                        "entry_price": updated["entry_price"],
+                        "size": updated["size"],
+                        "mode": TRADING_MODE,
+                        "status": "open",
+                        "external_order_id": updated.get("external_order_id"),
+                    }
+                    self.stats["position"] = self._format_position(self._open_trade)
+                else:
+                    self._open_trade = None
+                    self.stats["position"] = None
+                    self.stats["execution_status"] = "post-only-no-fill"
 
         # Live-only: stats updates, signal evaluation, and mid-window
         # snapshot emission apply only when the incoming event is for the
@@ -633,19 +682,44 @@ class Bot:
                 time.monotonic() - window.book_updated_at
                 if window.book_updated_at is not None else None
             )
-            result = execute_live_trade(
-                db_path=self.db_path,
-                signal=signal,
-                entry_price=entry_price,
-                size=size,
-                window_slug=window.slug,
-                token_id=token_id,
-                condition_id=window.condition_id,
-                client=self.live_order_client,
-                limit_price=limit_price,
-                submit_book_age_s_monotonic=book_age,
-                opposite_token_id=opposite_token_id,
-            )
+            if ENTRY_MODE == "post_only":
+                # Server-side `expiration` is the safety net for a silent
+                # bot. If the bot tick never reaches the cancel block above
+                # (no book events between t_remaining=cancel_threshold and
+                # window-end), the server kills the order at this timestamp.
+                # By the time _settle_trade runs at window close,
+                # get_settlement_info returns shares_held=0 and PnL settles
+                # to 0 — a status='placed' row reaching settle is the
+                # bot-silent path with the safety net engaged, not a bug.
+                expiration = int(window.end_time - POST_ONLY_EXPIRY_SAFETY_BUFFER_S)
+                result = execute_live_trade_post_only(
+                    db_path=self.db_path,
+                    signal=signal,
+                    intended_size=size,
+                    window_slug=window.slug,
+                    token_id=token_id,
+                    condition_id=window.condition_id,
+                    client=self.live_order_client,
+                    up_bids=window.up_bids,
+                    down_bids=window.down_bids,
+                    offset_ticks=POST_ONLY_REST_OFFSET_TICKS,
+                    expiration=expiration,
+                    submit_book_age_s_monotonic=book_age,
+                )
+            else:
+                result = execute_live_trade(
+                    db_path=self.db_path,
+                    signal=signal,
+                    entry_price=entry_price,
+                    size=size,
+                    window_slug=window.slug,
+                    token_id=token_id,
+                    condition_id=window.condition_id,
+                    client=self.live_order_client,
+                    limit_price=limit_price,
+                    submit_book_age_s_monotonic=book_age,
+                    opposite_token_id=opposite_token_id,
+                )
 
             # Diagnostic log: compare snapshot vs. realized fill for root-cause analysis.
             recorded = find_trade_by_window_slug(self.db_path, window.slug)
@@ -709,21 +783,30 @@ class Bot:
         if result.success:
             self._window_traded = True
             external_order_id = None
+            # Post-only places the order at status='placed', not 'open' —
+            # read both fields from the recorded row so the in-memory
+            # _open_trade tracks the executor's truth.
+            recorded_status = "open"
+            recorded_entry_price = entry_price
+            recorded_size = size
             if TRADING_MODE != "paper":
                 recorded = find_trade_by_window_slug(self.db_path, window.slug)
                 if recorded is not None:
                     external_order_id = recorded.get("external_order_id")
+                    recorded_status = recorded.get("status", "open")
+                    recorded_entry_price = recorded.get("entry_price", entry_price)
+                    recorded_size = recorded.get("size", size)
             self._open_trade = {
                 "trade_id": result.trade_id,
                 "side": signal.side,
-                "entry_price": entry_price,
-                "size": size,
+                "entry_price": recorded_entry_price,
+                "size": recorded_size,
                 "mode": TRADING_MODE,
-                "status": "open",
+                "status": recorded_status,
                 "external_order_id": external_order_id,
             }
             self.stats["position"] = self._format_position(self._open_trade)
-            self.stats["execution_status"] = "open"
+            self.stats["execution_status"] = recorded_status
             if self.on_trade:
                 self.on_trade(result, signal, window.slug)
             if self.on_stats_update:
