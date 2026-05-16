@@ -1306,6 +1306,68 @@ def test_execute_live_trade_post_only_placed_happy_path():
     os.unlink(db_path)
 
 
+def test_execute_live_trade_post_only_records_actual_placed_size():
+    """SDK wrapper's tick-safe quantization may shift size by ±6; the trade
+    row must reflect the actually-placed size (carried back via
+    PlaceResult.placed_size), not the caller's intended_size."""
+    db_path = make_db()
+    signal = _sample_signal()
+    signal = Signal(
+        side=signal.side, model_p_up=signal.model_p_up,
+        market_price=signal.market_price, edge=signal.edge,
+        up_edge=signal.up_edge, down_edge=signal.down_edge,
+        signal_reference_price=0.55,
+    )
+    client = MagicMock()
+    client.get_usdc_balance.return_value = 100.0
+    # Caller intended 10.5 shares; SDK quantized to 11 (or whatever) and
+    # surfaces the true value via placed_size.
+    client.submit_post_only.return_value = PlaceResult(
+        status="placed", order_id="po-quant", error=None, placed_size=11.0,
+    )
+    result = execute_live_trade_post_only(
+        db_path=db_path, signal=signal, intended_size=10.5,
+        window_slug="w-po-quant", token_id="T-UP", condition_id="C",
+        client=client,
+        up_bids=[], down_bids=_down_bids(0.45),
+        offset_ticks=2, expiration=1_700_000_000,
+    )
+    assert result.success
+    row = find_trade_by_window_slug(db_path, "w-po-quant")
+    assert row["status"] == "placed"
+    assert row["size"] == pytest.approx(11.0)
+    os.unlink(db_path)
+
+
+def test_execute_live_trade_post_only_falls_back_when_placed_size_none():
+    """Backwards compatibility: a PlaceResult without placed_size (e.g.
+    older test doubles) leaves the trade row at intended_size."""
+    db_path = make_db()
+    signal = _sample_signal()
+    signal = Signal(
+        side=signal.side, model_p_up=signal.model_p_up,
+        market_price=signal.market_price, edge=signal.edge,
+        up_edge=signal.up_edge, down_edge=signal.down_edge,
+        signal_reference_price=0.55,
+    )
+    client = MagicMock()
+    client.get_usdc_balance.return_value = 100.0
+    client.submit_post_only.return_value = PlaceResult(
+        status="placed", order_id="po-fb", error=None,  # placed_size omitted
+    )
+    result = execute_live_trade_post_only(
+        db_path=db_path, signal=signal, intended_size=7.0,
+        window_slug="w-po-fb", token_id="T-UP", condition_id="C",
+        client=client,
+        up_bids=[], down_bids=_down_bids(0.45),
+        offset_ticks=2, expiration=1_700_000_000,
+    )
+    assert result.success
+    row = find_trade_by_window_slug(db_path, "w-po-fb")
+    assert row["size"] == pytest.approx(7.0)
+    os.unlink(db_path)
+
+
 def test_execute_live_trade_post_only_no_opp_bid_skips():
     db_path = make_db()
     signal = _sample_signal()

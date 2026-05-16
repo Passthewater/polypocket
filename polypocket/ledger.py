@@ -238,14 +238,19 @@ def get_open_trade_by_window_slug(db_path: str, window_slug: str) -> dict | None
 
 
 def find_unsettled_trades(db_path: str) -> list[dict]:
-    """Return all trades with status 'open' or 'reserved' (not yet settled)."""
+    """Return all trades with status 'open', 'reserved', or 'placed'.
+
+    'placed' covers a resting post-only order that survived a bot-down-through-
+    window scenario — without it, the row is orphaned at startup and never
+    reconciled even after the server-side expiration kills the order.
+    """
     with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
             SELECT *
             FROM trades
-            WHERE status IN ('open', 'reserved')
+            WHERE status IN ('open', 'reserved', 'placed')
             ORDER BY id
             """,
         ).fetchall()

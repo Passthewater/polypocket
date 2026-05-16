@@ -14,6 +14,7 @@ from polypocket.ledger import (
     get_session_stats,
     find_duplicate_window_slugs,
     find_trade_by_window_slug,
+    find_unsettled_trades,
     get_snapshots_for_window,
     init_db,
     log_snapshot,
@@ -613,3 +614,30 @@ def test_init_db_signal_reference_columns_are_idempotent(tmp_path):
         col_count = sum(1 for row in c.execute("PRAGMA table_info(trades)").fetchall()
                         if row[1] == "signal_reference_price")
     assert col_count == 1
+
+
+def test_find_unsettled_trades_includes_placed():
+    """A resting post-only order (status='placed') from a previous run must
+    be returned by find_unsettled_trades so startup recovery picks it up
+    instead of orphaning it in the ledger."""
+    db_path = make_db()
+    log_trade(
+        db_path, window_slug="w-placed", side="up", entry_price=0.53,
+        size=10.0, fees=0.0, model_p_up=0.72, market_p_up=0.55, edge=0.18,
+        outcome=None, pnl=None, status="placed",
+        entry_mode="post_only", rest_price=0.53,
+    )
+    log_trade(
+        db_path, window_slug="w-open", side="down", entry_price=0.42,
+        size=5.0, fees=0.0, model_p_up=0.30, market_p_up=0.45, edge=0.12,
+        outcome=None, pnl=None, status="open",
+    )
+    log_trade(
+        db_path, window_slug="w-settled", side="up", entry_price=0.50,
+        size=8.0, fees=0.0, model_p_up=0.70, market_p_up=0.55, edge=0.10,
+        outcome="up", pnl=3.0, status="settled",
+    )
+    rows = find_unsettled_trades(db_path)
+    slugs = {r["window_slug"] for r in rows}
+    assert slugs == {"w-placed", "w-open"}
+    os.unlink(db_path)

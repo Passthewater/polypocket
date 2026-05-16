@@ -784,7 +784,8 @@ def test_polymarket_client_satisfies_live_order_client_protocol():
 
 
 def test_submit_post_only_placed(mock_clob):
-    """Happy path: SDK returns success+orderID, wrapper returns PlaceResult(placed)."""
+    """Happy path: SDK returns success+orderID, wrapper returns PlaceResult(placed)
+    with placed_size = the tick-safe-quantized integer that actually got signed."""
     client, inst = _make_client(mock_clob)
     inst.create_and_post_order.return_value = {
         "success": True, "orderID": "po-abc", "status": "live",
@@ -797,6 +798,8 @@ def test_submit_post_only_placed(mock_clob):
     assert place.status == "placed"
     assert place.order_id == "po-abc"
     assert place.error is None
+    # 10 shares @ $0.54 = $5.40 — tick-safe; size is integerized.
+    assert place.placed_size == pytest.approx(10.0)
     inst.create_and_post_order.assert_called_once()
 
 

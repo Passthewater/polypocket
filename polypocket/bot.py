@@ -301,43 +301,15 @@ class Bot:
                 )
             self._ptb_last_fetch = 0.0
 
-        # If the current window has expired and we're still holding an open
-        # trade, settle it now — regardless of whether this book event is
-        # for the live slot. Pre-subscribed next-slot events frequently
-        # arrive before any post-expiry event for the old slot.
-        if (
-            self._open_trade is not None
-            and self._current_window is not None
-            and self._current_window.end_time <= now
-        ):
-            outcome = await fetch_resolution(self._current_window.slug)
-            if outcome is not None:
-                log.info(
-                    "Official resolution for %s: %s",
-                    self._current_window.slug,
-                    outcome.upper(),
-                )
-                await self._settle_trade(outcome)
-            else:
-                self._pending_settlements.append({
-                    **self._open_trade,
-                    "window_slug": self._current_window.slug,
-                })
-                self._open_trade = None
-                self.stats["position"] = None
-                self.stats["execution_status"] = None
-                log.info(
-                    "Parked trade for expired window %s, awaiting resolution",
-                    self._current_window.slug,
-                )
-                if self.on_stats_update:
-                    self.on_stats_update(self.stats)
-
         # Post-only cancel-on-tick: if a resting maker order is approaching
-        # the no-trade band at window-end, cancel-and-reconcile so the order
-        # doesn't fill into the dead-zone. Server-side `expiration` is the
-        # safety net; this fast-path runs as soon as the bot sees a book
-        # event within the threshold.
+        # (or past) the no-trade band at window-end, cancel-and-reconcile so
+        # the order doesn't get settled blindly. The threshold check fires
+        # whenever (end_time - now) <= POST_ONLY_CANCEL_AT_T_REMAINING_S,
+        # including negative deltas — so a bot that was silent through the
+        # cancel deadline still routes 'placed' through the cancel-reconcile
+        # path here (which queries CLOB authoritatively for shares_held)
+        # before the expired-window settle block below runs. Server-side
+        # `expiration` is the safety net for orders the bot truly never sees.
         if (
             TRADING_MODE != "paper"
             and self._open_trade is not None
@@ -370,6 +342,41 @@ class Bot:
                     self._open_trade = None
                     self.stats["position"] = None
                     self.stats["execution_status"] = "post-only-no-fill"
+
+        # If the current window has expired and we're still holding an open
+        # trade, settle it now — regardless of whether this book event is
+        # for the live slot. Pre-subscribed next-slot events frequently
+        # arrive before any post-expiry event for the old slot. Any 'placed'
+        # trade reaching here has already been routed through the cancel-
+        # reconcile block above, so _open_trade is either 'open' (real
+        # position to settle) or None (no fill).
+        if (
+            self._open_trade is not None
+            and self._current_window is not None
+            and self._current_window.end_time <= now
+        ):
+            outcome = await fetch_resolution(self._current_window.slug)
+            if outcome is not None:
+                log.info(
+                    "Official resolution for %s: %s",
+                    self._current_window.slug,
+                    outcome.upper(),
+                )
+                await self._settle_trade(outcome)
+            else:
+                self._pending_settlements.append({
+                    **self._open_trade,
+                    "window_slug": self._current_window.slug,
+                })
+                self._open_trade = None
+                self.stats["position"] = None
+                self.stats["execution_status"] = None
+                log.info(
+                    "Parked trade for expired window %s, awaiting resolution",
+                    self._current_window.slug,
+                )
+                if self.on_stats_update:
+                    self.on_stats_update(self.stats)
 
         # Live-only: stats updates, signal evaluation, and mid-window
         # snapshot emission apply only when the incoming event is for the
@@ -725,36 +732,58 @@ class Bot:
             recorded = find_trade_by_window_slug(self.db_path, window.slug)
             recorded_status = recorded.get("status") if recorded else None
             recorded_error = recorded.get("error") if recorded else None
-            # For rejected/reserved rows, size & entry_price still hold the
-            # *intended* values (never overwritten by a failed fill). Reporting
-            # them as `filled` and `vwap` would lie — only read them when the
-            # trade actually transitioned to an on-chain fill (open/settled).
+            # For rejected/reserved/placed rows, size & entry_price still hold
+            # the *intended* values (never overwritten by a failed fill).
+            # Reporting them as `filled` and `vwap` would lie — only read them
+            # when the trade actually transitioned to an on-chain fill
+            # (open/settled).
             is_fill = recorded_status in {"open", "settled"}
             actual_size = recorded.get("size") if (recorded and is_fill) else None
             actual_price = recorded.get("entry_price") if (recorded and is_fill) else None
             shortfall = (size - actual_size) if actual_size is not None else None
-            # Capture the opposite-book best bid that drove limit_price, so
-            # post-mortem can compare the decision-time clearing vs. the
-            # realized fill. Matches the opp_bids pick in ioc_limit_price.
+            # Capture the opposite-book best bid so post-mortem can compare
+            # the decision-time clearing vs. the realized fill. Matches the
+            # opp_bids pick in ioc_limit_price / post_only_rest_price.
             opp_bids_for_diag = window.down_bids if signal.side == "up" else window.up_bids
             best_opp_bid = max(
                 (float(b["price"]) for b in (opp_bids_for_diag or [])),
                 default=None,
             )
             implied_clearing = (1.0 - best_opp_bid) if best_opp_bid is not None else None
-            log.info(
-                "IOC_DIAG intended=%.4f target=%.4f fillable=%.4f limit=%.4f "
-                "opp_best_bid=%s implied_clearing=%s "
-                "status=%s error=%s filled=%s vwap=%s shortfall=%s",
-                intended_size_pre_clamp, size, fillable, limit_price,
-                f"{best_opp_bid:.4f}" if best_opp_bid is not None else "n/a",
-                f"{implied_clearing:.4f}" if implied_clearing is not None else "n/a",
-                recorded_status or "n/a",
-                recorded_error or "n/a",
-                f"{actual_size:.4f}" if actual_size is not None else "n/a",
-                f"{actual_price:.4f}" if actual_price is not None else "n/a",
-                f"{shortfall:.4f}" if shortfall is not None else "n/a",
-            )
+            if ENTRY_MODE == "post_only":
+                # Post-only: limit_price (FAK helper output) was computed but
+                # not used. rest_price is the actual placement, lifted from
+                # the trade row so we report the same value the executor
+                # signed against.
+                rest_price = recorded.get("rest_price") if recorded else None
+                log.info(
+                    "POST_ONLY_DIAG intended=%.4f target=%.4f rest_price=%s "
+                    "opp_best_bid=%s implied_clearing=%s "
+                    "status=%s error=%s filled=%s vwap=%s shortfall=%s",
+                    intended_size_pre_clamp, size,
+                    f"{rest_price:.4f}" if rest_price is not None else "n/a",
+                    f"{best_opp_bid:.4f}" if best_opp_bid is not None else "n/a",
+                    f"{implied_clearing:.4f}" if implied_clearing is not None else "n/a",
+                    recorded_status or "n/a",
+                    recorded_error or "n/a",
+                    f"{actual_size:.4f}" if actual_size is not None else "n/a",
+                    f"{actual_price:.4f}" if actual_price is not None else "n/a",
+                    f"{shortfall:.4f}" if shortfall is not None else "n/a",
+                )
+            else:
+                log.info(
+                    "IOC_DIAG intended=%.4f target=%.4f fillable=%.4f limit=%.4f "
+                    "opp_best_bid=%s implied_clearing=%s "
+                    "status=%s error=%s filled=%s vwap=%s shortfall=%s",
+                    intended_size_pre_clamp, size, fillable, limit_price,
+                    f"{best_opp_bid:.4f}" if best_opp_bid is not None else "n/a",
+                    f"{implied_clearing:.4f}" if implied_clearing is not None else "n/a",
+                    recorded_status or "n/a",
+                    recorded_error or "n/a",
+                    f"{actual_size:.4f}" if actual_size is not None else "n/a",
+                    f"{actual_price:.4f}" if actual_price is not None else "n/a",
+                    f"{shortfall:.4f}" if shortfall is not None else "n/a",
+                )
 
         if not result.success and result.error == "window-already-consumed":
             self._window_traded = True
@@ -943,9 +972,31 @@ class Bot:
         init_db(self.db_path)
         log.info("Polypocket bot starting (mode=%s)", TRADING_MODE)
 
-        # Recover unsettled trades from previous runs
+        # Recover unsettled trades from previous runs. 'placed' rows (post-only
+        # rest orders that survived a bot-down-through-window scenario) need
+        # to be cancel-reconciled inline before pending settle — otherwise
+        # settle_live_trade would write 'settled, pnl=0' over a row that may
+        # still have a real partial fill on-chain.
         unsettled = find_unsettled_trades(self.db_path)
+        normalized: list[dict] = []
         for row in unsettled:
+            if (
+                row["status"] == "placed"
+                and TRADING_MODE != "paper"
+                and self.live_order_client is not None
+            ):
+                final = cancel_post_only_order(
+                    self.db_path, row, self.live_order_client,
+                    trigger="startup-recovery",
+                )
+                if final != "open":
+                    continue  # rejected / no-fill — nothing to settle
+                refreshed = find_trade_by_window_slug(self.db_path, row["window_slug"])
+                if refreshed is None or refreshed.get("status") != "open":
+                    continue
+                row = refreshed
+            normalized.append(row)
+        for row in normalized:
             self._pending_settlements.append({
                 "trade_id": row["id"],
                 "side": row["side"],
@@ -957,7 +1008,10 @@ class Bot:
                 "external_order_id": row.get("external_order_id"),
             })
         if unsettled:
-            log.info("Recovered %d unsettled trade(s) from database", len(unsettled))
+            log.info(
+                "Recovered %d unsettled trade(s) from database (%d carried to pending)",
+                len(unsettled), len(normalized),
+            )
 
         async def poll_and_stream():
             while not self.stop.is_set():

@@ -387,7 +387,10 @@ class PolymarketClient:
                 "token=%s cond=%s",
                 side, size, price, expiration, token_id, condition_id,
             )
-            return PlaceResult(status="placed", order_id="DRY-RUN", error=None)
+            return PlaceResult(
+                status="placed", order_id="DRY-RUN", error=None,
+                placed_size=float(size),
+            )
 
         # Tick-safe quantization — same defense-in-depth as submit_ioc.
         target_size_int = max(1, int(round(size)))
@@ -453,7 +456,10 @@ class PolymarketClient:
                 status="rejected", order_id=None, error="no-order-id",
             )
 
-        return PlaceResult(status="placed", order_id=order_id, error=None)
+        return PlaceResult(
+            status="placed", order_id=order_id, error=None,
+            placed_size=float(size_int),
+        )
 
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a resting order. Retries on transient errors.

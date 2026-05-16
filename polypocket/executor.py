@@ -43,10 +43,18 @@ class FillResult:
 class PlaceResult:
     """Outcome of a post-only place request. Distinct from FillResult, which
     represents terminal fills; a PlaceResult represents the order's
-    acceptance into the book (or its rejection at placement)."""
+    acceptance into the book (or its rejection at placement).
+
+    `placed_size` is the size actually placed on the server (after the SDK
+    wrapper's tick-safe integer quantization). Differs from the caller's
+    intended_size by up to ±6 — the executor must update the trade row to
+    this value so the local ledger matches what's resting on the book.
+    None on non-placed outcomes.
+    """
     status: Literal["placed", "rejected", "error"]
     order_id: str | None
     error: str | None
+    placed_size: float | None = None
 
 
 @dataclass(frozen=True)
@@ -589,14 +597,20 @@ def execute_live_trade_post_only(
         )
         return TradeResult(success=False, trade_id=trade_id, error=place.error)
 
-    # status == "placed"
+    # status == "placed". The SDK wrapper may have quantized size to a
+    # tick-safe integer that differs from intended_size by ±6 — overwrite
+    # the trade row's size with the actual placed size so the local ledger
+    # matches what's resting on the book. Falls back to intended_size if
+    # the wrapper didn't surface a placed_size (e.g. test doubles).
+    effective_size = place.placed_size if place.placed_size is not None else intended_size
     update_trade(
         db_path, trade_id, outcome=None, pnl=None, status="placed",
         external_order_id=place.order_id,
+        size=effective_size,
     )
     log.info(
         "post-only PLACED: %s %s rest=$%.4f x%.2f exp=%d token=%s order=%s",
-        window_slug, signal.side, rest_price, intended_size,
+        window_slug, signal.side, rest_price, effective_size,
         expiration, token_id, place.order_id,
     )
     return TradeResult(success=True, trade_id=trade_id, pnl=None)
