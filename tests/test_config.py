@@ -24,7 +24,7 @@ def test_defaults_are_sane():
     assert FEE_RATE == 0.072
     assert MIN_POSITION_USDC == 5.0
     assert MAX_POSITION_USDC == 20.0
-    assert MAX_DAILY_LOSS == 50.0
+    assert MAX_DAILY_LOSS == 15.0
     assert MAX_CONSECUTIVE_LOSSES == 5
     assert VOLATILITY_LOOKBACK == 50
     assert WINDOW_ENTRY_MIN_ELAPSED == 60

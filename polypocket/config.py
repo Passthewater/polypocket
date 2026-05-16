@@ -72,7 +72,7 @@ EDGE_FLOOR = 0.03
 EDGE_RANGE = 0.17
 
 # --- Risk ---
-MAX_DAILY_LOSS = 50.0
+MAX_DAILY_LOSS = 15.0
 MAX_CONSECUTIVE_LOSSES = 5
 
 # --- Signal model ---
