@@ -26,5 +26,6 @@ for _key in (
     "POST_ONLY_REST_OFFSET_TICKS",
     "POST_ONLY_CANCEL_AT_T_REMAINING_S",
     "POST_ONLY_EXPIRY_SAFETY_BUFFER_S",
+    "POLYMARKET_MIN_EXPIRATION_BUFFER_S",
 ):
     os.environ.pop(_key, None)

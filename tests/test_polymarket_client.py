@@ -805,7 +805,11 @@ def test_submit_post_only_placed(mock_clob):
 
 def test_submit_post_only_passes_v2_order_args(mock_clob):
     """Call-arg shape: OrderArgs with side=Side.BUY (enum, NOT str), expiration,
-    plus order_type=GTC and post_only=True at the call site."""
+    plus order_type=GTD (when expiration > 0) and post_only=True at the call site.
+
+    GTD-not-GTC is empirical: the server returns 400 'invalid expiration
+    value, it should be equal to 0 as the order is not a GTD order' when a
+    GTC carries a non-zero expiration."""
     from py_clob_client_v2 import OrderType, Side
     client, inst = _make_client(mock_clob)
     inst.create_and_post_order.return_value = {
@@ -826,8 +830,26 @@ def test_submit_post_only_passes_v2_order_args(mock_clob):
     assert args.side != "Side.BUY"
     assert args.expiration == 1_700_000_000
     assert kwargs["options"].tick_size == "0.01"
-    assert kwargs["order_type"] == OrderType.GTC
+    assert kwargs["order_type"] == OrderType.GTD
     assert kwargs["post_only"] is True
+
+
+def test_submit_post_only_uses_gtc_when_expiration_zero(mock_clob):
+    """expiration=0 means 'no server-side expiry' and falls back to GTC.
+    A bot using this path takes full responsibility for driving cancel."""
+    from py_clob_client_v2 import OrderType
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_order.return_value = {
+        "success": True, "orderID": "po-no-exp", "status": "live",
+    }
+    client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND",
+        expiration=0,
+    )
+    kwargs = inst.create_and_post_order.call_args.kwargs
+    assert kwargs["order_type"] == OrderType.GTC
+    assert kwargs["order_args"].expiration == 0
 
 
 def test_submit_post_only_would_cross_via_400(mock_clob):

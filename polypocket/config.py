@@ -129,9 +129,19 @@ POST_ONLY_CANCEL_AT_T_REMAINING_S = float(os.getenv("POST_ONLY_CANCEL_AT_T_REMAI
 # Seconds subtracted from window.end_time when computing the server-side
 # order `expiration` field. Defense-in-depth against a bot tick that
 # misses its cancel deadline — server kills the order if the bot is
-# silent through the boundary. Same nominal value as the bot-side
-# threshold by design.
-POST_ONLY_EXPIRY_SAFETY_BUFFER_S = float(os.getenv("POST_ONLY_EXPIRY_SAFETY_BUFFER_S", "30"))
+# silent through the boundary. Default 60 mirrors the server's own
+# security threshold (see POLYMARKET_MIN_EXPIRATION_BUFFER_S): the
+# server rejects any expiration value less than now + 60s with a 400
+# (empirical, Step-9 probe 2026-05-16).
+POST_ONLY_EXPIRY_SAFETY_BUFFER_S = float(os.getenv("POST_ONLY_EXPIRY_SAFETY_BUFFER_S", "60"))
+# Polymarket's server-side security threshold for GTD `expiration` values.
+# Any expiration < now + 60s is rejected with HTTP 400. The bot computes
+# expiration = window.end_time - POST_ONLY_EXPIRY_SAFETY_BUFFER_S; when
+# that falls below `now + this + safety`, the dispatch site floors to a
+# server-accepted value (bot-side cancel handles window-end protection
+# in that band). 65 = 60s threshold + 5s safety against clock skew /
+# request transit time.
+POLYMARKET_MIN_EXPIRATION_BUFFER_S = float(os.getenv("POLYMARKET_MIN_EXPIRATION_BUFFER_S", "65"))
 # Fraction of book depth (at <= FOK limit price) we ask for as our FOK
 # size. Leaves headroom for the book to thin between our depth read and
 # the signed order reaching the matcher. 0.9 = ask for at most 90% of
@@ -176,6 +186,7 @@ def snapshot_gate_config() -> dict:
         "POST_ONLY_REST_OFFSET_TICKS": POST_ONLY_REST_OFFSET_TICKS,
         "POST_ONLY_CANCEL_AT_T_REMAINING_S": POST_ONLY_CANCEL_AT_T_REMAINING_S,
         "POST_ONLY_EXPIRY_SAFETY_BUFFER_S": POST_ONLY_EXPIRY_SAFETY_BUFFER_S,
+        "POLYMARKET_MIN_EXPIRATION_BUFFER_S": POLYMARKET_MIN_EXPIRATION_BUFFER_S,
         "DEPTH_CLAMP_BUFFER": DEPTH_CLAMP_BUFFER,
         "MIN_FILL_RATIO": MIN_FILL_RATIO,
         "MAX_BOOK_AGE_S": MAX_BOOK_AGE_S,

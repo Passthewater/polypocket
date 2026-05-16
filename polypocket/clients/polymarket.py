@@ -414,11 +414,17 @@ class PolymarketClient:
             side=Side.BUY,
             expiration=int(expiration),
         )
+        # Empirical (Step-9 live probe 2026-05-16): the server rejects GTC
+        # with a non-zero expiration ("invalid expiration value (...), it
+        # should be equal to '0' as the order is not a GTD order"). Use GTD
+        # when we want a server-side expiration safety net, GTC only when
+        # expiration is 0 (no safety net — bot must drive cancel).
+        order_type = OrderType.GTD if int(expiration) > 0 else OrderType.GTC
         try:
             resp = self._client.create_and_post_order(
                 order_args=args,
                 options=PartialCreateOrderOptions(tick_size=TICK_SIZE),
-                order_type=OrderType.GTC,
+                order_type=order_type,
                 post_only=True,
             )
         except Exception as exc:

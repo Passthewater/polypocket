@@ -1934,10 +1934,20 @@ async def test_bot_dispatches_to_post_only_when_entry_mode_set(tmp_path: Path, m
 
     post_only_mock.assert_called_once()
     fak_mock.assert_not_called()
-    # Dispatch passed offset_ticks + expiration
+    # Dispatch passed offset_ticks + expiration. Expiration is the max of
+    # (window.end_time - POST_ONLY_EXPIRY_SAFETY_BUFFER_S) and the server's
+    # required minimum (now + POLYMARKET_MIN_EXPIRATION_BUFFER_S). With
+    # the default buffers (60 and 65) and the helper's end_offset=180,
+    # both candidates are <= now + 120 so the floor wins.
     kwargs = post_only_mock.call_args.kwargs
     assert kwargs["offset_ticks"] == 2  # default POST_ONLY_REST_OFFSET_TICKS
-    assert kwargs["expiration"] == int(window.end_time - 30.0)
+    expected_target = int(window.end_time - 60.0)
+    expected_floor = int(time.time()) + 65
+    expected_min = max(expected_target, expected_floor)
+    # Allow a 1s slack — wall clock may have ticked between bot call and assertion.
+    assert abs(kwargs["expiration"] - expected_min) <= 1, (
+        f"expected ~{expected_min}, got {kwargs['expiration']}"
+    )
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ from polypocket.config import (
     MIN_FILL_RATIO,
     MIN_POSITION_USDC,
     PAPER_DB_PATH,
+    POLYMARKET_MIN_EXPIRATION_BUFFER_S,
     POST_ONLY_CANCEL_AT_T_REMAINING_S,
     POST_ONLY_EXPIRY_SAFETY_BUFFER_S,
     POST_ONLY_REST_OFFSET_TICKS,
@@ -694,11 +695,17 @@ class Bot:
                 # bot. If the bot tick never reaches the cancel block above
                 # (no book events between t_remaining=cancel_threshold and
                 # window-end), the server kills the order at this timestamp.
-                # By the time _settle_trade runs at window close,
-                # get_settlement_info returns shares_held=0 and PnL settles
-                # to 0 — a status='placed' row reaching settle is the
-                # bot-silent path with the safety net engaged, not a bug.
-                expiration = int(window.end_time - POST_ONLY_EXPIRY_SAFETY_BUFFER_S)
+                #
+                # Floor at `now + POLYMARKET_MIN_EXPIRATION_BUFFER_S` (default
+                # 65s, mirroring the server's 60s security threshold + 5s
+                # safety): the v2 server rejects any expiration value less
+                # than now+60 with HTTP 400 (empirical, Step-9 probe). When
+                # t_remaining is too small for the buffer-from-end target
+                # to clear that floor, the floor wins; the bot-side cancel-
+                # on-tick handles window-end protection in that band.
+                target_exp = int(window.end_time - POST_ONLY_EXPIRY_SAFETY_BUFFER_S)
+                server_min_exp = int(time.time()) + int(POLYMARKET_MIN_EXPIRATION_BUFFER_S)
+                expiration = max(target_exp, server_min_exp)
                 result = execute_live_trade_post_only(
                     db_path=self.db_path,
                     signal=signal,
