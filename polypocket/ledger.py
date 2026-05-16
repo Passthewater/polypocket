@@ -78,6 +78,10 @@ def init_db(db_path: str) -> None:
                 conn.execute("ALTER TABLE trades ADD COLUMN signal_reference_price REAL")
             if "signal_reference_source" not in existing_cols:
                 conn.execute("ALTER TABLE trades ADD COLUMN signal_reference_source TEXT")
+            if "entry_mode" not in existing_cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN entry_mode TEXT")
+            if "rest_price" not in existing_cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN rest_price REAL")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS window_snapshots (
@@ -263,6 +267,8 @@ def log_trade(
     status: str,
     signal_reference_price: float | None = None,
     signal_reference_source: str | None = None,
+    entry_mode: str | None = None,
+    rest_price: float | None = None,
 ) -> int:
     with closing(sqlite3.connect(db_path)) as conn:
         cursor = conn.execute(
@@ -270,8 +276,9 @@ def log_trade(
             INSERT INTO trades (
                 window_slug, side, entry_price, size, fees,
                 model_p_up, market_p_up, edge, outcome, pnl, status,
-                signal_reference_price, signal_reference_source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                signal_reference_price, signal_reference_source,
+                entry_mode, rest_price
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 window_slug,
@@ -287,6 +294,8 @@ def log_trade(
                 status,
                 signal_reference_price,
                 signal_reference_source,
+                entry_mode,
+                rest_price,
             ),
         )
         conn.commit()

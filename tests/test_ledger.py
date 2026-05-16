@@ -58,6 +58,66 @@ def test_log_and_retrieve_trade():
     os.unlink(db_path)
 
 
+def test_log_trade_persists_entry_mode_and_rest_price():
+    db_path = make_db()
+    log_trade(
+        db_path,
+        window_slug="btc-5m-po-1",
+        side="up",
+        entry_price=0.54,
+        size=10.0,
+        fees=0.115,
+        model_p_up=0.72,
+        market_p_up=0.575,
+        edge=0.145,
+        outcome=None,
+        pnl=None,
+        status="placed",
+        entry_mode="post_only",
+        rest_price=0.54,
+    )
+    trade = find_trade_by_window_slug(db_path, "btc-5m-po-1")
+    assert trade is not None
+    assert trade["entry_mode"] == "post_only"
+    assert trade["rest_price"] == pytest.approx(0.54)
+    # Default behavior still works: FAK row leaves both null.
+    log_trade(
+        db_path,
+        window_slug="btc-5m-fak-1",
+        side="up",
+        entry_price=0.55,
+        size=10.0,
+        fees=0.115,
+        model_p_up=0.72,
+        market_p_up=0.55,
+        edge=0.17,
+        outcome=None,
+        pnl=None,
+        status="open",
+    )
+    fak = find_trade_by_window_slug(db_path, "btc-5m-fak-1")
+    assert fak["entry_mode"] is None
+    assert fak["rest_price"] is None
+    os.unlink(db_path)
+
+
+def test_init_db_is_idempotent_on_new_columns():
+    """Re-running init_db against a DB that already has entry_mode/rest_price
+    columns must not error and must not duplicate the columns."""
+    db_path = make_db()
+    init_db(db_path)  # second call
+    init_db(db_path)  # third call
+    # Explicit close before unlink — Windows holds a file lock on open conns.
+    conn = sqlite3.connect(db_path)
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()]
+    finally:
+        conn.close()
+    assert cols.count("entry_mode") == 1
+    assert cols.count("rest_price") == 1
+    os.unlink(db_path)
+
+
 def test_find_trade_by_window_slug_returns_existing_trade_row():
     db_path = make_db()
     log_trade(
