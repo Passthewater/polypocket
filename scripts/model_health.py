@@ -13,7 +13,6 @@ weekly reports flagging the same bin warrants a refit (humans decide; this
 script does not refit).
 """
 import argparse
-import logging
 import math
 import os
 import sqlite3
@@ -23,8 +22,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from polypocket.config import LIVE_DB_PATH, PAPER_DB_PATH
-
-log = logging.getLogger(__name__)
 
 DEFAULT_BIN_WIDTH = 0.05
 DEFAULT_BIN_LO = 0.50
@@ -164,7 +161,7 @@ def flag_breaches(
     """Return rows where n >= n_threshold AND |gap| > gap_threshold."""
     flagged = []
     for row in table:
-        if row["n"] is None or row["gap"] is None:
+        if row["gap"] is None:
             continue
         if row["n"] >= n_threshold and abs(row["gap"]) > gap_threshold:
             flagged.append(row)
