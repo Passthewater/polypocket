@@ -1,4 +1,4 @@
-# PnL Attribution Report -- 2026-05-12 01:34 UTC
+# PnL Attribution Report -- 2026-05-13 19:15 UTC
 
 ## Paper
 
@@ -6,15 +6,15 @@
 
 | Window | N | Realized | Edge | Slip | Exp.Fee | Luck | Fee-luck |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Lifetime | 1331 | $+2587.88 | $+2514.90 | $+1097.18 | $-162.12 | $-862.08 | $+14.59 |
-| Last 100 | 100 | $+853.85 | $+609.74 | $+224.67 | $-35.70 | $+55.15 | $-1.39 |
-| Last 20 | 20 | $+152.49 | $+112.00 | $+40.85 | $-6.87 | $+6.52 | $-0.09 |
+| Lifetime | 1483 | $+3834.03 | $+3302.17 | $+1366.87 | $-204.82 | $-630.19 | $+11.38 |
+| Last 100 | 100 | $+840.95 | $+481.95 | $+182.01 | $-28.51 | $+205.50 | $-3.06 |
+| Last 20 | 20 | $+332.46 | $+169.83 | $+59.41 | $-8.68 | $+111.90 | $-1.55 |
 
-**Context (all rows incl. approximate):** lifetime realized=$+2595.16, edge=$+2518.21, slip=$+1097.18
+**Context (all rows incl. approximate):** lifetime realized=$+3841.30, edge=$+3305.48, slip=$+1366.87
 
-**Provenance:** exact/live=1329, approximate=2, missing=0, unattributable=0
+**Provenance:** exact/live=1481, approximate=2, missing=0, unattributable=0
 
-**Model cohort:** v1-attributed=1013, v2-attributed=316
+**Model cohort:** v1-attributed=1013, v2-attributed=468
 
 ## Live
 
