@@ -8,10 +8,13 @@ from unittest.mock import MagicMock
 
 from polypocket.executor import (
     FillResult,
+    PlaceResult,
     SettlementInfo,
     TradeResult,
-    execute_paper_trade,
+    cancel_post_only_order,
     execute_live_trade,
+    execute_live_trade_post_only,
+    execute_paper_trade,
     reconcile_recovered_trade,
     settle_live_trade,
 )
@@ -1258,3 +1261,228 @@ def test_execute_paper_trade_persists_signal_reference_price(tmp_path):
     row = find_trade_by_window_slug(db, "w1")
     assert row["signal_reference_price"] == pytest.approx(0.60, abs=1e-9)
     assert row["signal_reference_source"] == "live"
+
+
+# ---------------------------------------------------------------------------
+# Post-only / maker-side entries (2026-05-15)
+# ---------------------------------------------------------------------------
+
+
+def _down_bids(price, size=100.0):
+    return [{"price": price, "size": size}]
+
+
+def test_execute_live_trade_post_only_placed_happy_path():
+    db_path = make_db()
+    signal = _sample_signal()
+    signal = Signal(
+        side=signal.side, model_p_up=signal.model_p_up,
+        market_price=signal.market_price, edge=signal.edge,
+        up_edge=signal.up_edge, down_edge=signal.down_edge,
+        signal_reference_price=0.55,
+    )
+    client = MagicMock()
+    client.get_usdc_balance.return_value = 100.0
+    client.submit_post_only.return_value = PlaceResult(
+        status="placed", order_id="po-abc", error=None,
+    )
+    result = execute_live_trade_post_only(
+        db_path=db_path, signal=signal, intended_size=10.0,
+        window_slug="w-po-1", token_id="T-UP", condition_id="C",
+        client=client,
+        up_bids=[], down_bids=_down_bids(0.45),
+        offset_ticks=2, expiration=1_700_000_000,
+    )
+    assert result.success
+    row = find_trade_by_window_slug(db_path, "w-po-1")
+    assert row["status"] == "placed"
+    assert row["entry_mode"] == "post_only"
+    # rest_price = 1 - 0.45 - 0.02 = 0.53
+    assert row["rest_price"] == pytest.approx(0.53)
+    assert row["entry_price"] == pytest.approx(0.53)
+    assert row["external_order_id"] == "po-abc"
+    events = _order_events(db_path, row["id"])
+    assert {e["event_type"] for e in events} >= {"place", "ack"}
+    os.unlink(db_path)
+
+
+def test_execute_live_trade_post_only_no_opp_bid_skips():
+    db_path = make_db()
+    signal = _sample_signal()
+    client = MagicMock()
+    client.get_usdc_balance.return_value = 100.0
+    result = execute_live_trade_post_only(
+        db_path=db_path, signal=signal, intended_size=10.0,
+        window_slug="w-po-2", token_id="T-UP", condition_id="C",
+        client=client,
+        up_bids=[], down_bids=[],
+        offset_ticks=2, expiration=1_700_000_000,
+    )
+    assert result.success is False
+    assert result.error == "no-pair-merge-counterparty"
+    # No row written.
+    assert find_trade_by_window_slug(db_path, "w-po-2") is None
+    client.submit_post_only.assert_not_called()
+    os.unlink(db_path)
+
+
+def test_execute_live_trade_post_only_insufficient_balance():
+    db_path = make_db()
+    signal = _sample_signal()
+    client = MagicMock()
+    client.get_usdc_balance.return_value = 1.0  # below need
+    result = execute_live_trade_post_only(
+        db_path=db_path, signal=signal, intended_size=10.0,
+        window_slug="w-po-3", token_id="T-UP", condition_id="C",
+        client=client,
+        up_bids=[], down_bids=_down_bids(0.45),
+        offset_ticks=2, expiration=1_700_000_000,
+    )
+    assert result.success is False
+    assert result.error == "insufficient-balance"
+    assert find_trade_by_window_slug(db_path, "w-po-3") is None
+    client.submit_post_only.assert_not_called()
+    os.unlink(db_path)
+
+
+def test_execute_live_trade_post_only_would_cross_rejected():
+    db_path = make_db()
+    signal = _sample_signal()
+    client = MagicMock()
+    client.get_usdc_balance.return_value = 100.0
+    client.submit_post_only.return_value = PlaceResult(
+        status="rejected", order_id="po-xc", error="post-only-would-cross",
+    )
+    result = execute_live_trade_post_only(
+        db_path=db_path, signal=signal, intended_size=10.0,
+        window_slug="w-po-4", token_id="T-UP", condition_id="C",
+        client=client,
+        up_bids=[], down_bids=_down_bids(0.45),
+        offset_ticks=2, expiration=1_700_000_000,
+    )
+    assert result.success is False
+    row = find_trade_by_window_slug(db_path, "w-po-4")
+    assert row["status"] == "rejected"
+    assert row["error"] == "post-only-would-cross"
+    assert row["external_order_id"] == "po-xc"
+    events = _order_events(db_path, row["id"])
+    assert {e["event_type"] for e in events} == {"place", "ack", "reject"}
+    os.unlink(db_path)
+
+
+def test_cancel_post_only_order_full_fill():
+    db_path = make_db()
+    # Pre-populate a placed row.
+    trade_id = persist_trade(
+        db_path=db_path, window_slug="w-po-5", side="up", entry_price=0.54,
+        size=10.0, fees=0.0, model_p_up=0.72, market_p_up=0.55, edge=0.18,
+        outcome=None, pnl=None, status="placed",
+        entry_mode="post_only", rest_price=0.54,
+    )
+    update_trade(db_path, trade_id, outcome=None, pnl=None, status="placed",
+                 external_order_id="po-1")
+
+    client = MagicMock()
+    client.cancel_order.return_value = True
+    client.get_settlement_info.return_value = SettlementInfo(
+        shares_held=10.0, cost_usdc=5.40,
+    )
+    trade_row = find_trade_by_window_slug(db_path, "w-po-5")
+    final = cancel_post_only_order(db_path, trade_row, client, trigger="window-close")
+
+    assert final == "open"
+    row = find_trade_by_window_slug(db_path, "w-po-5")
+    assert row["status"] == "open"
+    assert row["size"] == pytest.approx(10.0)
+    assert row["entry_price"] == pytest.approx(0.54)
+    events = _order_events(db_path, trade_id)
+    event_types = [e["event_type"] for e in events]
+    assert event_types.count("cancel") == 2  # request + ack phases
+    assert "fill" in event_types
+    os.unlink(db_path)
+
+
+def test_cancel_post_only_order_zero_fill():
+    db_path = make_db()
+    trade_id = persist_trade(
+        db_path=db_path, window_slug="w-po-6", side="up", entry_price=0.54,
+        size=10.0, fees=0.0, model_p_up=0.72, market_p_up=0.55, edge=0.18,
+        outcome=None, pnl=None, status="placed",
+        entry_mode="post_only", rest_price=0.54,
+    )
+    update_trade(db_path, trade_id, outcome=None, pnl=None, status="placed",
+                 external_order_id="po-2")
+
+    client = MagicMock()
+    client.cancel_order.return_value = True
+    client.get_settlement_info.return_value = SettlementInfo(
+        shares_held=0.0, cost_usdc=0.0,
+    )
+    trade_row = find_trade_by_window_slug(db_path, "w-po-6")
+    final = cancel_post_only_order(db_path, trade_row, client, trigger="window-close")
+
+    assert final == "rejected"
+    row = find_trade_by_window_slug(db_path, "w-po-6")
+    assert row["status"] == "rejected"
+    assert row["error"] == "post-only-no-fill"
+    os.unlink(db_path)
+
+
+def test_cancel_post_only_order_cancel_race_partial_fill():
+    """Integration-style: cancel returns False (race lost) but
+    get_settlement_info shows partial shares_held. CLOB state is authoritative;
+    row promotes to 'open' with the realized partial size."""
+    db_path = make_db()
+    trade_id = persist_trade(
+        db_path=db_path, window_slug="w-po-7", side="up", entry_price=0.54,
+        size=10.0, fees=0.0, model_p_up=0.72, market_p_up=0.55, edge=0.18,
+        outcome=None, pnl=None, status="placed",
+        entry_mode="post_only", rest_price=0.54,
+    )
+    update_trade(db_path, trade_id, outcome=None, pnl=None, status="placed",
+                 external_order_id="po-3", error="ignored-stale")
+
+    client = MagicMock()
+    client.cancel_order.return_value = False  # cancel lost the race
+    client.get_settlement_info.return_value = SettlementInfo(
+        shares_held=4.0, cost_usdc=2.16,
+    )
+    trade_row = find_trade_by_window_slug(db_path, "w-po-7")
+    final = cancel_post_only_order(db_path, trade_row, client, trigger="window-close")
+
+    assert final == "open"
+    row = find_trade_by_window_slug(db_path, "w-po-7")
+    assert row["status"] == "open"
+    assert row["size"] == pytest.approx(4.0)
+    assert row["entry_price"] == pytest.approx(0.54)
+    # Stale error cleared on promote.
+    assert row["error"] is None
+    os.unlink(db_path)
+
+
+def test_reconcile_recovered_trade_live_status_triggers_cancel():
+    """A recovered post-only trade with CLOB status='live' must be
+    cancelled-and-reconciled inline by the recovery path."""
+    db_path = make_db()
+    trade_id = persist_trade(
+        db_path=db_path, window_slug="w-po-rec", side="up", entry_price=0.54,
+        size=10.0, fees=0.0, model_p_up=0.72, market_p_up=0.55, edge=0.18,
+        outcome=None, pnl=None, status="placed",
+        entry_mode="post_only", rest_price=0.54,
+    )
+    update_trade(db_path, trade_id, outcome=None, pnl=None, status="placed",
+                 external_order_id="po-live")
+
+    client = MagicMock()
+    client.get_order_status.return_value = {"status": "live"}
+    # The cancel-reconcile path is exercised: zero-fill cleanup.
+    client.cancel_order.return_value = True
+    client.get_settlement_info.return_value = SettlementInfo(0.0, 0.0)
+
+    trade_row = find_trade_by_window_slug(db_path, "w-po-rec")
+    final = reconcile_recovered_trade(db_path, trade_row, client)
+
+    assert final == "rejected"
+    client.cancel_order.assert_called_once_with("po-live")
+    client.get_settlement_info.assert_called_once_with("po-live")
+    os.unlink(db_path)
