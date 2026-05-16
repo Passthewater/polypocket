@@ -4,6 +4,7 @@ import pytest
 
 from polypocket.clients.polymarket import (
     PolymarketClient, _tick_safe_size, fok_limit_price, ioc_limit_price,
+    post_only_rest_price,
 )
 
 
@@ -304,6 +305,42 @@ def test_ioc_limit_price_uses_highest_opposite_bid():
     )
     # 1 - 0.72 + 0.02 = 0.30
     assert limit == pytest.approx(0.30)
+
+
+def test_post_only_rest_price_up_uses_down_bid():
+    """Rest BUY UP at (1 - best_down_bid) - offset_ticks."""
+    down_bids = [{"price": 0.45, "size": 100.0}]
+    rest = post_only_rest_price(
+        side="up", up_bids=[], down_bids=down_bids, offset_ticks=2,
+    )
+    # 1 - 0.45 - 0.02 = 0.53
+    assert rest == pytest.approx(0.53)
+
+
+def test_post_only_rest_price_down_uses_up_bid():
+    """Symmetric: BUY DOWN's pair-merge clearing uses the UP-side best bid."""
+    up_bids = [{"price": 0.60, "size": 100.0}]
+    rest = post_only_rest_price(
+        side="down", up_bids=up_bids, down_bids=[], offset_ticks=3,
+    )
+    # 1 - 0.60 - 0.03 = 0.37
+    assert rest == pytest.approx(0.37)
+
+
+def test_post_only_rest_price_no_opp_bid_returns_none():
+    """No counterparty on opposite side → no pair-merge possible at any offset."""
+    assert post_only_rest_price(side="up", up_bids=[], down_bids=[], offset_ticks=2) is None
+    assert post_only_rest_price(side="up", up_bids=[], down_bids=None, offset_ticks=2) is None
+
+
+def test_post_only_rest_price_floors_at_one_cent():
+    """Extreme opp_bid pushing rest below 0.01 must clamp to 0.01."""
+    # 1 - 0.99 - 0.05 = -0.04 → clamp to 0.01.
+    down_bids = [{"price": 0.99, "size": 10.0}]
+    rest = post_only_rest_price(
+        side="up", up_bids=[], down_bids=down_bids, offset_ticks=5,
+    )
+    assert rest == 0.01
 
 
 def test_get_settlement_info_sums_trades(mock_clob):
@@ -740,7 +777,126 @@ def test_polymarket_client_satisfies_live_order_client_protocol():
     PolymarketClient without updating the executor's Protocol or call sites,
     this test catches it at import time."""
     for method in (
-        "submit_fok", "submit_ioc", "cancel_order",
+        "submit_fok", "submit_ioc", "submit_post_only", "cancel_order",
         "get_usdc_balance", "get_settlement_info", "get_order_status",
     ):
         assert hasattr(PolymarketClient, method), f"PolymarketClient missing {method}"
+
+
+def test_submit_post_only_placed(mock_clob):
+    """Happy path: SDK returns success+orderID, wrapper returns PlaceResult(placed)."""
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_order.return_value = {
+        "success": True, "orderID": "po-abc", "status": "live",
+    }
+    place = client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND",
+        expiration=int(1_700_000_000),
+    )
+    assert place.status == "placed"
+    assert place.order_id == "po-abc"
+    assert place.error is None
+    inst.create_and_post_order.assert_called_once()
+
+
+def test_submit_post_only_passes_v2_order_args(mock_clob):
+    """Call-arg shape: OrderArgs with side=Side.BUY (enum, NOT str), expiration,
+    plus order_type=GTC and post_only=True at the call site."""
+    from py_clob_client_v2 import OrderType, Side
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_order.return_value = {
+        "success": True, "orderID": "po-1", "status": "live",
+    }
+    client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND",
+        expiration=1_700_000_000,
+    )
+    kwargs = inst.create_and_post_order.call_args.kwargs
+    args = kwargs["order_args"]
+    assert args.token_id == "TKN-UP"
+    assert args.price == pytest.approx(0.54)
+    assert args.size == pytest.approx(10.0)
+    # Guards against str(Side.BUY) regression: must be the enum value, not "Side.BUY".
+    assert args.side == Side.BUY
+    assert args.side != "Side.BUY"
+    assert args.expiration == 1_700_000_000
+    assert kwargs["options"].tick_size == "0.01"
+    assert kwargs["order_type"] == OrderType.GTC
+    assert kwargs["post_only"] is True
+
+
+def test_submit_post_only_would_cross_via_400(mock_clob):
+    """v2 server raises PolyApiException(400) when post-only would cross."""
+    from py_clob_client_v2.exceptions import PolyApiException
+    client, inst = _make_client(mock_clob)
+    exc = PolyApiException.__new__(PolyApiException)
+    exc.status_code = 400
+    exc.error_msg = {
+        "error": "post_only order would cross the book",
+        "orderID": "po-xc",
+    }
+    inst.create_and_post_order.side_effect = exc
+
+    place = client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND", expiration=1_700_000_000,
+    )
+    assert place.status == "rejected"
+    assert place.error == "post-only-would-cross"
+    assert place.order_id == "po-xc"
+
+
+def test_submit_post_only_would_cross_via_success_false(mock_clob):
+    """Defensive: server may also surface cross-rejection as success=False
+    with errorMsg text instead of a 400 — wrapper detects either shape."""
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_order.return_value = {
+        "success": False, "orderID": "po-xc2",
+        "errorMsg": "post_only_would_cross",
+    }
+    place = client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND", expiration=1_700_000_000,
+    )
+    assert place.status == "rejected"
+    assert place.error == "post-only-would-cross"
+    assert place.order_id == "po-xc2"
+
+
+def test_submit_post_only_network_error(mock_clob):
+    """Non-400, non-classifiable exception → status=error with 'network:' prefix."""
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_order.side_effect = RuntimeError("conn reset")
+    place = client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND", expiration=1_700_000_000,
+    )
+    assert place.status == "error"
+    assert place.error.startswith("network:")
+
+
+def test_submit_post_only_tick_safe_unfixable(mock_clob):
+    """Patched _tick_safe_size returning None → rejected with tick-size-unfixable."""
+    client, inst = _make_client(mock_clob)
+    with patch("polypocket.clients.polymarket._tick_safe_size", return_value=None):
+        place = client.submit_post_only(
+            side="up", size=10.0, price=0.54,
+            token_id="TKN-UP", condition_id="0xCOND", expiration=1_700_000_000,
+        )
+    assert place.status == "rejected"
+    assert place.error == "tick-size-unfixable"
+    inst.create_and_post_order.assert_not_called()
+
+
+def test_submit_post_only_dry_run(mock_clob):
+    """Dry-run returns synthetic placed result without calling the SDK."""
+    client, inst = _make_client(mock_clob, dry_run=True)
+    place = client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND", expiration=1_700_000_000,
+    )
+    assert place.status == "placed"
+    assert place.order_id == "DRY-RUN"
+    inst.create_and_post_order.assert_not_called()
