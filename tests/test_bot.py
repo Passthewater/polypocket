@@ -1039,6 +1039,9 @@ async def test_live_mode_threads_up_token_id(tmp_path: Path, monkeypatch):
         def get_usdc_balance(self):
             return 1000.0
 
+        def get_order_book(self, token_id):
+            return {}
+
     db_path = tmp_path / "live.db"
     init_db(str(db_path))
     client = CapturingClient()
@@ -1114,6 +1117,9 @@ class _CapturingClient:
 
     def get_usdc_balance(self):
         return 1000.0
+
+    def get_order_book(self, token_id):
+        return {}
 
 
 @pytest.mark.asyncio

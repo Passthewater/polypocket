@@ -217,6 +217,9 @@ class RecordingLiveOrderClient:
     def get_usdc_balance(self):
         return self._balance
 
+    def get_order_book(self, token_id):
+        return {}
+
 
 class RejectingLiveOrderClient:
     def __init__(self, balance=1000.0, error="no match"):
@@ -240,6 +243,9 @@ class RejectingLiveOrderClient:
 
     def get_usdc_balance(self):
         return self._balance
+
+    def get_order_book(self, token_id):
+        return {}
 
 
 def test_live_trade_threads_args_to_client():
@@ -463,6 +469,9 @@ class SettlingLiveOrderClient:
         self.settlement_lookups.append(order_id)
         return self._settlements[order_id]
 
+    def get_order_book(self, token_id):
+        return {}
+
 
 def _seed_open_live_trade(db_path, window_slug, side, order_id):
     trade_id = persist_trade(
@@ -579,6 +588,8 @@ def test_live_trade_client_error_marks_trade_rejected():
                               avg_price=None, error="network: timeout")
         def get_usdc_balance(self):
             return 1000.0
+        def get_order_book(self, token_id):
+            return {}
 
     db_path = make_db()
     signal = Signal(side="up", model_p_up=0.72, market_price=0.51,
@@ -991,6 +1002,121 @@ def test_execute_live_trade_submit_payload_book_age_is_none_when_no_timestamp():
     import json
     submit_payload = json.loads(events[0]["payload_json"])
     assert submit_payload["book_age_s_monotonic"] is None
+    os.unlink(db_path)
+
+
+class _BookSnapshotClient(RecordingLiveOrderClient):
+    """RecordingLiveOrderClient + a per-token book response for ack-time snapshot."""
+    def __init__(self, books: dict[str, dict] | None = None, raise_on: str | None = None):
+        super().__init__()
+        self._books = books or {}
+        self._raise_on = raise_on
+        self.book_calls: list[str] = []
+
+    def get_order_book(self, token_id):
+        self.book_calls.append(token_id)
+        if self._raise_on and token_id == self._raise_on:
+            raise RuntimeError("simulated /book outage")
+        return self._books.get(token_id, {})
+
+
+def test_execute_live_trade_ack_payload_carries_book_at_ack():
+    """Ack-time book snapshot: both sides fetched, compressed to top-3, embedded
+    under `book_at_ack` with side-aware up/down keys."""
+    db_path = make_db()
+    up_book = {
+        "bids": [
+            {"price": "0.56", "size": "100"},
+            {"price": "0.55", "size": "200"},
+            {"price": "0.54", "size": "300"},
+            {"price": "0.53", "size": "400"},
+        ],
+        "asks": [{"price": "0.58", "size": "150"}],
+        "timestamp": "1778900000",
+        "hash": "abc",
+    }
+    down_book = {
+        "bids": [{"price": "0.41", "size": "120"}],
+        "asks": [{"price": "0.43", "size": "180"}],
+        "timestamp": "1778900001",
+        "hash": "def",
+    }
+    client = _BookSnapshotClient(books={"TKN-UP": up_book, "TKN-DOWN": down_book})
+
+    result = execute_live_trade(
+        db_path=db_path, signal=_sample_signal(),
+        entry_price=0.55, size=5.0, window_slug="w-book-ack",
+        token_id="TKN-UP", condition_id="C", client=client,
+        limit_price=0.63, opposite_token_id="TKN-DOWN",
+    )
+    assert result.success is True
+    assert client.book_calls == ["TKN-UP", "TKN-DOWN"]
+
+    events = _order_events(db_path, result.trade_id)
+    import json
+    ack_payload = json.loads(events[1]["payload_json"])
+    assert "book_at_ack" in ack_payload
+    assert ack_payload["book_at_ack"]["up_book"]["bids"] == up_book["bids"][:3]
+    assert ack_payload["book_at_ack"]["up_book"]["asks"] == up_book["asks"]
+    assert ack_payload["book_at_ack"]["up_book"]["hash"] == "abc"
+    assert ack_payload["book_at_ack"]["down_book"]["bids"] == down_book["bids"]
+    assert ack_payload["book_at_ack"]["down_book"]["asks"] == down_book["asks"]
+    assert ack_payload["book_fetched_at_wall"] is not None
+    os.unlink(db_path)
+
+
+def test_execute_live_trade_ack_payload_omits_book_when_fetch_raises():
+    """Book fetch is best-effort: a raising get_order_book must not break the
+    trade and must leave `book_at_ack` absent from the ack payload."""
+    db_path = make_db()
+    client = _BookSnapshotClient(raise_on="TKN-UP")
+
+    result = execute_live_trade(
+        db_path=db_path, signal=_sample_signal(),
+        entry_price=0.55, size=5.0, window_slug="w-book-fail",
+        token_id="TKN-UP", condition_id="C", client=client,
+        limit_price=0.63, opposite_token_id="TKN-DOWN",
+    )
+    assert result.success is True
+
+    events = _order_events(db_path, result.trade_id)
+    import json
+    ack_payload = json.loads(events[1]["payload_json"])
+    assert "book_at_ack" not in ack_payload
+    assert "book_fetched_at_wall" not in ack_payload
+    # Existing ack fields still present.
+    assert ack_payload["status"] == "filled"
+    os.unlink(db_path)
+
+
+def test_execute_live_trade_skips_opposite_book_when_token_id_absent():
+    """Backwards compatibility: callers that don't pass opposite_token_id still
+    work — only the side's own book is fetched, and book_at_ack reflects that."""
+    db_path = make_db()
+    side_book = {
+        "bids": [{"price": "0.56", "size": "100"}],
+        "asks": [{"price": "0.58", "size": "150"}],
+        "timestamp": "1778900000",
+    }
+    client = _BookSnapshotClient(books={"TKN-UP": side_book})
+
+    result = execute_live_trade(
+        db_path=db_path, signal=_sample_signal(),
+        entry_price=0.55, size=5.0, window_slug="w-no-opp",
+        token_id="TKN-UP", condition_id="C", client=client,
+        limit_price=0.63,
+        # opposite_token_id default → None: opposite book is empty
+    )
+    assert result.success is True
+    assert client.book_calls == ["TKN-UP"]
+
+    events = _order_events(db_path, result.trade_id)
+    import json
+    ack_payload = json.loads(events[1]["payload_json"])
+    assert ack_payload["book_at_ack"]["up_book"]["bids"] == side_book["bids"]
+    # Opposite book is present-but-empty (no token to fetch).
+    assert ack_payload["book_at_ack"]["down_book"]["bids"] == []
+    assert ack_payload["book_at_ack"]["down_book"]["asks"] == []
     os.unlink(db_path)
 
 

@@ -63,6 +63,7 @@ class LiveOrderClient(Protocol):
     def get_usdc_balance(self) -> float: ...
     def get_settlement_info(self, order_id: str) -> SettlementInfo: ...
     def get_order_status(self, order_id: str) -> dict: ...
+    def get_order_book(self, token_id: str) -> dict: ...
 
 
 def reconcile_recovered_trade(
@@ -284,6 +285,24 @@ def execute_paper_trade(
     return TradeResult(success=True, trade_id=trade_id, pnl=pnl)
 
 
+def _book_top_n(book: dict, n: int = 3) -> dict:
+    """Compress a /book response to top-N levels on each side, plus timestamp.
+
+    The v2 /book endpoint returns dicts of stringified prices/sizes already
+    sorted best-first per side. We keep just the head — full depth would
+    bloat order_events payloads and we only need the top for the adverse-
+    selection diagnostic.
+    """
+    if not isinstance(book, dict):
+        return {}
+    return {
+        "bids": (book.get("bids") or [])[:n],
+        "asks": (book.get("asks") or [])[:n],
+        "timestamp": book.get("timestamp"),
+        "hash": book.get("hash"),
+    }
+
+
 def execute_live_trade(
     db_path: str,
     signal: Signal,
@@ -295,6 +314,7 @@ def execute_live_trade(
     client: LiveOrderClient,
     limit_price: float,
     submit_book_age_s_monotonic: float | None = None,
+    opposite_token_id: str | None = None,
 ) -> TradeResult:
     existing_trade = find_trade_by_window_slug(db_path, window_slug)
     if existing_trade is not None:
@@ -350,9 +370,39 @@ def execute_live_trade(
         condition_id=condition_id,
         limit_price=limit_price,
     )
+    # Ack-time book snapshot: best-effort fresh REST read of both tokens'
+    # books so analyses can measure book drift across the submit→ack window
+    # (the asyncio loop is blocked during submit_ioc, so the bot's locally
+    # cached book can't update). Any fetch failure is swallowed — this is a
+    # diagnostic, never a trade blocker.
+    book_at_ack: dict | None = None
+    book_fetched_at_wall: float | None = None
+    try:
+        side_book = client.get_order_book(token_id)
+        opp_book = (
+            client.get_order_book(opposite_token_id)
+            if opposite_token_id else {}
+        )
+        book_fetched_at_wall = time.time()
+        if signal.side == "up":
+            book_at_ack = {
+                "up_book": _book_top_n(side_book),
+                "down_book": _book_top_n(opp_book),
+            }
+        else:
+            book_at_ack = {
+                "up_book": _book_top_n(opp_book),
+                "down_book": _book_top_n(side_book),
+            }
+    except Exception as exc:
+        log.warning("ack-time book snapshot failed: %s", exc)
+    ack_payload: dict = {"status": fill.status, "error": fill.error}
+    if book_at_ack is not None:
+        ack_payload["book_at_ack"] = book_at_ack
+        ack_payload["book_fetched_at_wall"] = book_fetched_at_wall
     log_order_event(
         db_path, trade_id, window_slug, "ack", time.time(),
-        payload={"status": fill.status, "error": fill.error},
+        payload=ack_payload,
         external_order_id=fill.order_id,
     )
 

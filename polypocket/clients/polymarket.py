@@ -363,6 +363,21 @@ class PolymarketClient:
             return {}
         return self._client.get_order(order_id)
 
+    def get_order_book(self, token_id: str) -> dict:
+        """Fetch the live order book for a token. Best-effort diagnostic call.
+
+        Returns `{}` on dry-run or any SDK/network error so a fetch failure
+        never breaks the trade flow — this is called post-submit purely for
+        the adverse-selection diagnostic.
+        """
+        if self._dry_run:
+            return {}
+        try:
+            return self._client.get_order_book(token_id) or {}
+        except Exception as exc:
+            log.warning("get_order_book failed for %s: %s", token_id, exc)
+            return {}
+
     def get_settlement_info(self, order_id: str) -> SettlementInfo:
         """Look up the CLOB record of a filled order and return real fill accounting.
 

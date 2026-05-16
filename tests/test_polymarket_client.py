@@ -210,6 +210,36 @@ def test_get_usdc_balance_handles_empty_wallet(mock_clob):
     assert client.get_usdc_balance() == pytest.approx(0.0)
 
 
+def test_get_order_book_returns_sdk_payload(mock_clob):
+    client, inst = _make_client(mock_clob)
+    payload = {
+        "bids": [{"price": "0.56", "size": "100"}],
+        "asks": [{"price": "0.58", "size": "200"}],
+        "timestamp": "1778900000",
+    }
+    inst.get_order_book.return_value = payload
+
+    book = client.get_order_book("TKN-UP")
+
+    assert book == payload
+    inst.get_order_book.assert_called_once_with("TKN-UP")
+
+
+def test_get_order_book_swallows_sdk_error(mock_clob):
+    """Ack-time diagnostic must never break the trade flow on network failures."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order_book.side_effect = RuntimeError("503 service unavailable")
+
+    book = client.get_order_book("TKN-UP")
+
+    assert book == {}
+
+
+def test_get_order_book_dry_run_returns_empty(mock_clob):
+    client, _ = _make_client(mock_clob, dry_run=True)
+    assert client.get_order_book("TKN-UP") == {}
+
+
 def test_fok_limit_price_adds_slippage_ticks():
     from polypocket.config import FOK_SLIPPAGE_TICKS
     assert fok_limit_price(0.40) == pytest.approx(round(0.40 + FOK_SLIPPAGE_TICKS * 0.01, 2))
