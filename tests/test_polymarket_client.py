@@ -4,6 +4,7 @@ import pytest
 
 from polypocket.clients.polymarket import (
     PolymarketClient, _tick_safe_size, fok_limit_price, ioc_limit_price,
+    post_only_rest_price,
 )
 
 
@@ -210,6 +211,36 @@ def test_get_usdc_balance_handles_empty_wallet(mock_clob):
     assert client.get_usdc_balance() == pytest.approx(0.0)
 
 
+def test_get_order_book_returns_sdk_payload(mock_clob):
+    client, inst = _make_client(mock_clob)
+    payload = {
+        "bids": [{"price": "0.56", "size": "100"}],
+        "asks": [{"price": "0.58", "size": "200"}],
+        "timestamp": "1778900000",
+    }
+    inst.get_order_book.return_value = payload
+
+    book = client.get_order_book("TKN-UP")
+
+    assert book == payload
+    inst.get_order_book.assert_called_once_with("TKN-UP")
+
+
+def test_get_order_book_swallows_sdk_error(mock_clob):
+    """Ack-time diagnostic must never break the trade flow on network failures."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order_book.side_effect = RuntimeError("503 service unavailable")
+
+    book = client.get_order_book("TKN-UP")
+
+    assert book == {}
+
+
+def test_get_order_book_dry_run_returns_empty(mock_clob):
+    client, _ = _make_client(mock_clob, dry_run=True)
+    assert client.get_order_book("TKN-UP") == {}
+
+
 def test_fok_limit_price_adds_slippage_ticks():
     from polypocket.config import FOK_SLIPPAGE_TICKS
     assert fok_limit_price(0.40) == pytest.approx(round(0.40 + FOK_SLIPPAGE_TICKS * 0.01, 2))
@@ -274,6 +305,42 @@ def test_ioc_limit_price_uses_highest_opposite_bid():
     )
     # 1 - 0.72 + 0.02 = 0.30
     assert limit == pytest.approx(0.30)
+
+
+def test_post_only_rest_price_up_uses_down_bid():
+    """Rest BUY UP at (1 - best_down_bid) - offset_ticks."""
+    down_bids = [{"price": 0.45, "size": 100.0}]
+    rest = post_only_rest_price(
+        side="up", up_bids=[], down_bids=down_bids, offset_ticks=2,
+    )
+    # 1 - 0.45 - 0.02 = 0.53
+    assert rest == pytest.approx(0.53)
+
+
+def test_post_only_rest_price_down_uses_up_bid():
+    """Symmetric: BUY DOWN's pair-merge clearing uses the UP-side best bid."""
+    up_bids = [{"price": 0.60, "size": 100.0}]
+    rest = post_only_rest_price(
+        side="down", up_bids=up_bids, down_bids=[], offset_ticks=3,
+    )
+    # 1 - 0.60 - 0.03 = 0.37
+    assert rest == pytest.approx(0.37)
+
+
+def test_post_only_rest_price_no_opp_bid_returns_none():
+    """No counterparty on opposite side → no pair-merge possible at any offset."""
+    assert post_only_rest_price(side="up", up_bids=[], down_bids=[], offset_ticks=2) is None
+    assert post_only_rest_price(side="up", up_bids=[], down_bids=None, offset_ticks=2) is None
+
+
+def test_post_only_rest_price_floors_at_one_cent():
+    """Extreme opp_bid pushing rest below 0.01 must clamp to 0.01."""
+    # 1 - 0.99 - 0.05 = -0.04 → clamp to 0.01.
+    down_bids = [{"price": 0.99, "size": 10.0}]
+    rest = post_only_rest_price(
+        side="up", up_bids=[], down_bids=down_bids, offset_ticks=5,
+    )
+    assert rest == 0.01
 
 
 def test_get_settlement_info_sums_trades(mock_clob):
@@ -400,6 +467,95 @@ def test_get_settlement_info_handles_null_order_body(mock_clob):
     assert info.shares_held == 0.0
     assert info.cost_usdc == 0.0
     inst.get_trades.assert_not_called()
+
+
+def test_get_settlement_info_counts_maker_fills(mock_clob):
+    """Post-only / GTC orders fill as MAKER, not taker. Our order_id appears
+    inside the fill's `maker_orders[]` array (with its own `matched_amount`
+    and `price`), while `taker_order_id` is the counterparty's. The top-level
+    `size` is the total cross — using it would overcount by orders of
+    magnitude.
+
+    Regression for the cohort run on 2026-05-16 that silently lost ~$25:
+    every post-only fill returned shares_held=0 here, so the bot wrote the
+    trade as 'rejected, post-only-no-fill' while the position settled in
+    the background.
+    """
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {"associate_trades": ["t1"]}
+    inst.get_trades.return_value = [
+        {
+            "id": "t1",
+            # Total cross was 171.22 shares against 16 makers; our order is
+            # one of those 16 with matched_amount=10. Top-level size and
+            # price are the AGGREGATE — irrelevant to us.
+            "taker_order_id": "0xTAKER",
+            "size": "171.22", "price": "0.5", "fee_rate_bps": "0",
+            "maker_orders": [
+                {"order_id": "0xOTHER1", "matched_amount": "5",  "price": "0.51", "fee_rate_bps": ""},
+                {"order_id": "0xOID",    "matched_amount": "10", "price": "0.49", "fee_rate_bps": ""},
+                {"order_id": "0xOTHER2", "matched_amount": "20", "price": "0.50", "fee_rate_bps": ""},
+            ],
+        },
+    ]
+
+    info = client.get_settlement_info("0xOID")
+
+    # Our slice only: 10 shares @ $0.49 = $4.90; no fee on this match.
+    assert info.shares_held == pytest.approx(10.0)
+    assert info.cost_usdc == pytest.approx(4.90)
+
+
+def test_get_settlement_info_maker_fill_with_fee(mock_clob):
+    """Maker fee_rate_bps is honored when present (some markets charge a
+    nonzero maker fee; empty string and None both mean 0)."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {"associate_trades": ["t1"]}
+    inst.get_trades.return_value = [
+        {
+            "id": "t1", "taker_order_id": "0xTAKER",
+            "size": "20.0", "price": "0.50", "fee_rate_bps": "0",
+            "maker_orders": [
+                {"order_id": "0xOID", "matched_amount": "10", "price": "0.49", "fee_rate_bps": "100"},
+            ],
+        },
+    ]
+
+    info = client.get_settlement_info("0xOID")
+
+    # 10 shares × (1 - 100/10000) = 9.9 shares net of fee; cost is gross 10*$0.49=$4.90.
+    assert info.shares_held == pytest.approx(9.9)
+    assert info.cost_usdc == pytest.approx(4.90)
+
+
+def test_get_settlement_info_aggregates_taker_and_maker_paths(mock_clob):
+    """An order CAN appear as taker on one match and maker on another (rare
+    but possible across the order's lifetime). Both paths must contribute."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {"associate_trades": ["t1", "t2"]}
+
+    def fake_get_trades(params):
+        if params.id == "t1":
+            return [{
+                "id": "t1", "taker_order_id": "0xOID",
+                "size": "5", "price": "0.40", "fee_rate_bps": "0",
+                "maker_orders": [{"order_id": "0xOTHER", "matched_amount": "5", "price": "0.40"}],
+            }]
+        return [{
+            "id": "t2", "taker_order_id": "0xOTHER",
+            "size": "100", "price": "0.99", "fee_rate_bps": "0",
+            "maker_orders": [
+                {"order_id": "0xOID", "matched_amount": "3", "price": "0.48", "fee_rate_bps": ""},
+            ],
+        }]
+
+    inst.get_trades.side_effect = fake_get_trades
+
+    info = client.get_settlement_info("0xOID")
+
+    # Taker portion: 5 @ $0.40 = $2.00. Maker portion: 3 @ $0.48 = $1.44.
+    assert info.shares_held == pytest.approx(8.0)
+    assert info.cost_usdc == pytest.approx(3.44)
 
 
 def test_cancel_order_success(mock_clob):
@@ -710,7 +866,151 @@ def test_polymarket_client_satisfies_live_order_client_protocol():
     PolymarketClient without updating the executor's Protocol or call sites,
     this test catches it at import time."""
     for method in (
-        "submit_fok", "submit_ioc", "cancel_order",
+        "submit_fok", "submit_ioc", "submit_post_only", "cancel_order",
         "get_usdc_balance", "get_settlement_info", "get_order_status",
     ):
         assert hasattr(PolymarketClient, method), f"PolymarketClient missing {method}"
+
+
+def test_submit_post_only_placed(mock_clob):
+    """Happy path: SDK returns success+orderID, wrapper returns PlaceResult(placed)
+    with placed_size = the tick-safe-quantized integer that actually got signed."""
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_order.return_value = {
+        "success": True, "orderID": "po-abc", "status": "live",
+    }
+    place = client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND",
+        expiration=int(1_700_000_000),
+    )
+    assert place.status == "placed"
+    assert place.order_id == "po-abc"
+    assert place.error is None
+    # 10 shares @ $0.54 = $5.40 — tick-safe; size is integerized.
+    assert place.placed_size == pytest.approx(10.0)
+    inst.create_and_post_order.assert_called_once()
+
+
+def test_submit_post_only_passes_v2_order_args(mock_clob):
+    """Call-arg shape: OrderArgs with side=Side.BUY (enum, NOT str), expiration,
+    plus order_type=GTD (when expiration > 0) and post_only=True at the call site.
+
+    GTD-not-GTC is empirical: the server returns 400 'invalid expiration
+    value, it should be equal to 0 as the order is not a GTD order' when a
+    GTC carries a non-zero expiration."""
+    from py_clob_client_v2 import OrderType, Side
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_order.return_value = {
+        "success": True, "orderID": "po-1", "status": "live",
+    }
+    client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND",
+        expiration=1_700_000_000,
+    )
+    kwargs = inst.create_and_post_order.call_args.kwargs
+    args = kwargs["order_args"]
+    assert args.token_id == "TKN-UP"
+    assert args.price == pytest.approx(0.54)
+    assert args.size == pytest.approx(10.0)
+    # Guards against str(Side.BUY) regression: must be the enum value, not "Side.BUY".
+    assert args.side == Side.BUY
+    assert args.side != "Side.BUY"
+    assert args.expiration == 1_700_000_000
+    assert kwargs["options"].tick_size == "0.01"
+    assert kwargs["order_type"] == OrderType.GTD
+    assert kwargs["post_only"] is True
+
+
+def test_submit_post_only_uses_gtc_when_expiration_zero(mock_clob):
+    """expiration=0 means 'no server-side expiry' and falls back to GTC.
+    A bot using this path takes full responsibility for driving cancel."""
+    from py_clob_client_v2 import OrderType
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_order.return_value = {
+        "success": True, "orderID": "po-no-exp", "status": "live",
+    }
+    client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND",
+        expiration=0,
+    )
+    kwargs = inst.create_and_post_order.call_args.kwargs
+    assert kwargs["order_type"] == OrderType.GTC
+    assert kwargs["order_args"].expiration == 0
+
+
+def test_submit_post_only_would_cross_via_400(mock_clob):
+    """v2 server raises PolyApiException(400) when post-only would cross."""
+    from py_clob_client_v2.exceptions import PolyApiException
+    client, inst = _make_client(mock_clob)
+    exc = PolyApiException.__new__(PolyApiException)
+    exc.status_code = 400
+    exc.error_msg = {
+        "error": "post_only order would cross the book",
+        "orderID": "po-xc",
+    }
+    inst.create_and_post_order.side_effect = exc
+
+    place = client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND", expiration=1_700_000_000,
+    )
+    assert place.status == "rejected"
+    assert place.error == "post-only-would-cross"
+    assert place.order_id == "po-xc"
+
+
+def test_submit_post_only_would_cross_via_success_false(mock_clob):
+    """Defensive: server may also surface cross-rejection as success=False
+    with errorMsg text instead of a 400 — wrapper detects either shape."""
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_order.return_value = {
+        "success": False, "orderID": "po-xc2",
+        "errorMsg": "post_only_would_cross",
+    }
+    place = client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND", expiration=1_700_000_000,
+    )
+    assert place.status == "rejected"
+    assert place.error == "post-only-would-cross"
+    assert place.order_id == "po-xc2"
+
+
+def test_submit_post_only_network_error(mock_clob):
+    """Non-400, non-classifiable exception → status=error with 'network:' prefix."""
+    client, inst = _make_client(mock_clob)
+    inst.create_and_post_order.side_effect = RuntimeError("conn reset")
+    place = client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND", expiration=1_700_000_000,
+    )
+    assert place.status == "error"
+    assert place.error.startswith("network:")
+
+
+def test_submit_post_only_tick_safe_unfixable(mock_clob):
+    """Patched _tick_safe_size returning None → rejected with tick-size-unfixable."""
+    client, inst = _make_client(mock_clob)
+    with patch("polypocket.clients.polymarket._tick_safe_size", return_value=None):
+        place = client.submit_post_only(
+            side="up", size=10.0, price=0.54,
+            token_id="TKN-UP", condition_id="0xCOND", expiration=1_700_000_000,
+        )
+    assert place.status == "rejected"
+    assert place.error == "tick-size-unfixable"
+    inst.create_and_post_order.assert_not_called()
+
+
+def test_submit_post_only_dry_run(mock_clob):
+    """Dry-run returns synthetic placed result without calling the SDK."""
+    client, inst = _make_client(mock_clob, dry_run=True)
+    place = client.submit_post_only(
+        side="up", size=10.0, price=0.54,
+        token_id="TKN-UP", condition_id="0xCOND", expiration=1_700_000_000,
+    )
+    assert place.status == "placed"
+    assert place.order_id == "DRY-RUN"
+    inst.create_and_post_order.assert_not_called()

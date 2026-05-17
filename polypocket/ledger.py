@@ -78,6 +78,10 @@ def init_db(db_path: str) -> None:
                 conn.execute("ALTER TABLE trades ADD COLUMN signal_reference_price REAL")
             if "signal_reference_source" not in existing_cols:
                 conn.execute("ALTER TABLE trades ADD COLUMN signal_reference_source TEXT")
+            if "entry_mode" not in existing_cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN entry_mode TEXT")
+            if "rest_price" not in existing_cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN rest_price REAL")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS window_snapshots (
@@ -234,14 +238,19 @@ def get_open_trade_by_window_slug(db_path: str, window_slug: str) -> dict | None
 
 
 def find_unsettled_trades(db_path: str) -> list[dict]:
-    """Return all trades with status 'open' or 'reserved' (not yet settled)."""
+    """Return all trades with status 'open', 'reserved', or 'placed'.
+
+    'placed' covers a resting post-only order that survived a bot-down-through-
+    window scenario — without it, the row is orphaned at startup and never
+    reconciled even after the server-side expiration kills the order.
+    """
     with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
             SELECT *
             FROM trades
-            WHERE status IN ('open', 'reserved')
+            WHERE status IN ('open', 'reserved', 'placed')
             ORDER BY id
             """,
         ).fetchall()
@@ -263,6 +272,8 @@ def log_trade(
     status: str,
     signal_reference_price: float | None = None,
     signal_reference_source: str | None = None,
+    entry_mode: str | None = None,
+    rest_price: float | None = None,
 ) -> int:
     with closing(sqlite3.connect(db_path)) as conn:
         cursor = conn.execute(
@@ -270,8 +281,9 @@ def log_trade(
             INSERT INTO trades (
                 window_slug, side, entry_price, size, fees,
                 model_p_up, market_p_up, edge, outcome, pnl, status,
-                signal_reference_price, signal_reference_source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                signal_reference_price, signal_reference_source,
+                entry_mode, rest_price
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 window_slug,
@@ -287,6 +299,8 @@ def log_trade(
                 status,
                 signal_reference_price,
                 signal_reference_source,
+                entry_mode,
+                rest_price,
             ),
         )
         conn.commit()

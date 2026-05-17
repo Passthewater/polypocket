@@ -22,5 +22,8 @@ corpus*.parquet
 # Generated PnL attribution reports (committed sample is whitelisted on first run only).
 scripts/_pnl_attribution.md
 
+# Generated post-only replay reports (committed sample is whitelisted on first run only).
+scripts/_post_only_replay.md
+
 # Throwaway probe scripts — never commit.
 scripts/_probe_*.py

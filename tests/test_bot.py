@@ -1039,6 +1039,9 @@ async def test_live_mode_threads_up_token_id(tmp_path: Path, monkeypatch):
         def get_usdc_balance(self):
             return 1000.0
 
+        def get_order_book(self, token_id):
+            return {}
+
     db_path = tmp_path / "live.db"
     init_db(str(db_path))
     client = CapturingClient()
@@ -1114,6 +1117,9 @@ class _CapturingClient:
 
     def get_usdc_balance(self):
         return 1000.0
+
+    def get_order_book(self, token_id):
+        return {}
 
 
 @pytest.mark.asyncio
@@ -1852,3 +1858,238 @@ async def test_phase5_new_window_resets_cadence(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(bot_module.time, "time", lambda: t0 + 320.0)
     await bot._on_book_update(window_b, "up")
     assert len(get_book_samples(str(db_path), "win-b")) == 1
+
+
+# ---------------------------------------------------------------------------
+# Post-only / maker-side entries (2026-05-15)
+# ---------------------------------------------------------------------------
+
+
+def _post_only_window(slug="btc-updown-5m-po", end_offset=180.0):
+    return Window(
+        condition_id="po-cond",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + end_offset,
+        slug=slug,
+        price_to_beat=84198.0,
+        up_ask=0.55,
+        down_ask=0.45,
+        up_bids=[{"price": 0.50, "size": 100.0}],
+        down_bids=[{"price": 0.45, "size": 100.0}],
+    )
+
+
+@pytest.mark.asyncio
+async def test_bot_dispatches_to_post_only_when_entry_mode_set(tmp_path: Path, monkeypatch):
+    """ENTRY_MODE=post_only routes the live branch to execute_live_trade_post_only,
+    NOT to execute_live_trade."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+    monkeypatch.setattr(bot_module, "ENTRY_MODE", "post_only")
+
+    fak_mock = Mock(return_value=TradeResult(success=False, error="should-not-fire"))
+    post_only_mock = Mock(return_value=TradeResult(success=True, trade_id=1, pnl=None))
+    monkeypatch.setattr(bot_module, "execute_live_trade", fak_mock)
+    monkeypatch.setattr(bot_module, "execute_live_trade_post_only", post_only_mock)
+
+    client = Mock()
+    client.get_usdc_balance.return_value = 100.0
+
+    bot = Bot(db_path=str(db_path), live_order_client=client)
+    bot.binance.latest_price = 84350.0
+    bot.signal_engine.evaluate = Mock(return_value=Signal(
+        side="up", model_p_up=0.75, market_price=0.55, edge=0.20,
+        up_edge=0.20, down_edge=-0.20, signal_reference_price=0.55,
+    ))
+    bot.risk.check = lambda: (True, "")
+
+    window = _post_only_window()
+    window.book_updated_at = time.monotonic()
+
+    # Have the mocked dispatch write the placed row, mirroring what the
+    # real execute_live_trade_post_only would do — otherwise the bot's
+    # post-dispatch find_trade_by_window_slug returns None and the
+    # _open_trade fall-through uses the dispatch-call's intended_size.
+    def _fake_post_only_dispatch(**kwargs):
+        log_trade(
+            db_path=str(db_path),
+            window_slug=kwargs["window_slug"],
+            side="up", entry_price=0.53, size=kwargs["intended_size"], fees=0.0,
+            model_p_up=0.75, market_p_up=0.55, edge=0.20,
+            outcome=None, pnl=None, status="placed",
+            entry_mode="post_only", rest_price=0.53,
+        )
+        return TradeResult(success=True, trade_id=1, pnl=None)
+
+    post_only_mock.side_effect = _fake_post_only_dispatch
+
+    await bot._on_book_update(window, "up")
+
+    post_only_mock.assert_called_once()
+    fak_mock.assert_not_called()
+    # Dispatch passed offset_ticks + expiration. Expiration is the max of
+    # (window.end_time - POST_ONLY_EXPIRY_SAFETY_BUFFER_S) and the server's
+    # required minimum (now + POLYMARKET_MIN_EXPIRATION_BUFFER_S). With
+    # the default buffers (60 and 65) and the helper's end_offset=180,
+    # both candidates are <= now + 120 so the floor wins.
+    kwargs = post_only_mock.call_args.kwargs
+    assert kwargs["offset_ticks"] == 2  # default POST_ONLY_REST_OFFSET_TICKS
+    expected_target = int(window.end_time - 60.0)
+    expected_floor = int(time.time()) + 65
+    expected_min = max(expected_target, expected_floor)
+    # Allow a 1s slack — wall clock may have ticked between bot call and assertion.
+    assert abs(kwargs["expiration"] - expected_min) <= 1, (
+        f"expected ~{expected_min}, got {kwargs['expiration']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bot_cancels_post_only_at_t_remaining_threshold(tmp_path: Path, monkeypatch):
+    """When a resting post-only is open and t_remaining <= threshold,
+    the bot tick fires cancel_post_only_order with trigger='window-close'."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+
+    # Pre-populate a placed trade in the DB.
+    trade_id = log_trade(
+        db_path=str(db_path),
+        window_slug="btc-updown-5m-po-cancel",
+        side="up", entry_price=0.53, size=10.0, fees=0.0,
+        model_p_up=0.75, market_p_up=0.55, edge=0.20,
+        outcome=None, pnl=None, status="placed",
+        entry_mode="post_only", rest_price=0.53,
+    )
+    from polypocket.ledger import update_trade
+    update_trade(str(db_path), trade_id, outcome=None, pnl=None, status="placed",
+                 external_order_id="po-1")
+
+    cancel_mock = Mock(return_value="rejected")
+    monkeypatch.setattr(bot_module, "cancel_post_only_order", cancel_mock)
+
+    bot = Bot(db_path=str(db_path), live_order_client=Mock())
+    bot.binance.latest_price = 84000.0
+    bot.signal_engine.evaluate = Mock(return_value=None)
+    bot.risk.check = lambda: (True, "")
+    bot._open_trade = {
+        "trade_id": trade_id, "side": "up", "entry_price": 0.53, "size": 10.0,
+        "mode": "live", "status": "placed", "external_order_id": "po-1",
+    }
+    bot._current_window = _post_only_window(slug="btc-updown-5m-po-cancel", end_offset=10.0)
+    bot._current_window_id = bot._current_window.condition_id
+    bot._window_traded = True  # block signal eval re-fire on this same tick
+
+    # t_remaining = 10s on the window — under the 30s threshold.
+    await bot._on_book_update(bot._current_window, "up")
+
+    cancel_mock.assert_called_once()
+    _, _, _, kwargs_or_trigger = cancel_mock.call_args.args + (None,) * (4 - len(cancel_mock.call_args.args))
+    assert cancel_mock.call_args.kwargs.get("trigger") == "window-close"
+    # Returned 'rejected' → open_trade dropped, status set.
+    assert bot._open_trade is None
+    assert bot.stats["execution_status"] == "post-only-no-fill"
+
+
+@pytest.mark.asyncio
+async def test_bot_post_only_cancel_promotes_partial_fill(tmp_path: Path, monkeypatch):
+    """cancel_post_only_order returns 'open' (partial fill detected) → bot
+    adopts the partial fill as the open position."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+    from polypocket.ledger import update_trade
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+
+    trade_id = log_trade(
+        db_path=str(db_path),
+        window_slug="btc-updown-5m-po-partial",
+        side="up", entry_price=0.53, size=10.0, fees=0.0,
+        model_p_up=0.75, market_p_up=0.55, edge=0.20,
+        outcome=None, pnl=None, status="placed",
+        entry_mode="post_only", rest_price=0.53,
+    )
+    update_trade(str(db_path), trade_id, outcome=None, pnl=None, status="placed",
+                 external_order_id="po-2")
+
+    # Simulate cancel-reconcile promoting to open with size=4 partial.
+    def fake_cancel(db_path_arg, trade_row, client, trigger):
+        update_trade(db_path_arg, trade_row["id"], outcome=None, pnl=None,
+                     status="open", size=4.0, entry_price=0.53)
+        return "open"
+
+    monkeypatch.setattr(bot_module, "cancel_post_only_order", fake_cancel)
+
+    bot = Bot(db_path=str(db_path), live_order_client=Mock())
+    bot.binance.latest_price = 84000.0
+    bot.signal_engine.evaluate = Mock(return_value=None)
+    bot.risk.check = lambda: (True, "")
+    bot._open_trade = {
+        "trade_id": trade_id, "side": "up", "entry_price": 0.53, "size": 10.0,
+        "mode": "live", "status": "placed", "external_order_id": "po-2",
+    }
+    bot._current_window = _post_only_window(slug="btc-updown-5m-po-partial", end_offset=10.0)
+    bot._current_window_id = bot._current_window.condition_id
+    bot._window_traded = True
+
+    await bot._on_book_update(bot._current_window, "up")
+
+    assert bot._open_trade is not None
+    assert bot._open_trade["status"] == "open"
+    assert bot._open_trade["size"] == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
+async def test_paper_path_unchanged_with_post_only_config_set(tmp_path: Path, monkeypatch):
+    """Bit-identity guarantee: ENTRY_MODE=post_only in paper mode must NOT
+    enter any post-only code path. Paper continues to call execute_paper_trade
+    with no submit_post_only call on any client mock."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "paper")
+    monkeypatch.setattr(bot_module, "ENTRY_MODE", "post_only")  # set but irrelevant
+
+    db_path = tmp_path / "bot.db"
+    init_db(str(db_path))
+
+    paper_mock = Mock(return_value=TradeResult(success=True, trade_id=1, pnl=None))
+    post_only_mock = Mock(return_value=TradeResult(success=False, error="should-not-fire"))
+    monkeypatch.setattr(bot_module, "execute_paper_trade", paper_mock)
+    monkeypatch.setattr(bot_module, "execute_live_trade_post_only", post_only_mock)
+
+    bot = Bot(db_path=str(db_path))
+    bot.binance.latest_price = 84350.0
+    bot.signal_engine.evaluate = lambda **kwargs: Signal(
+        side="up", model_p_up=0.75, market_price=0.55, edge=0.20,
+        up_edge=0.20, down_edge=-0.20, signal_reference_price=0.55,
+    )
+    bot.risk.check = lambda: (True, "")
+
+    window = _post_only_window(slug="btc-updown-5m-paper-po")
+    await bot._on_book_update(window, "up")
+
+    paper_mock.assert_called_once()
+    post_only_mock.assert_not_called()
+
+
+def test_recoverable_statuses_includes_placed_in_live(monkeypatch):
+    """Structural check: live-mode recovery sweeps over 'placed' so a
+    resting post-only order from a previous run gets cancel-and-reconciled.
+    Verified indirectly via the source — string match on the placed-add line."""
+    import inspect, polypocket.bot as bot_module
+    src = inspect.getsource(bot_module._on_book_update if False else bot_module.Bot._on_book_update)
+    assert 'recoverable_statuses.add("placed")' in src

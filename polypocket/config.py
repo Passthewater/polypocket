@@ -110,6 +110,38 @@ FOK_SLIPPAGE_TICKS = int(os.getenv("FOK_SLIPPAGE_TICKS", "3"))
 # fills) produced median slip 6¢ vs 11.6¢ at buffer=15 — SHIP verdict per
 # design doc. See #14, closes #12.
 IOC_BUFFER_TICKS = int(os.getenv("IOC_BUFFER_TICKS", "8"))
+# Execution mode for live trades. "fak" keeps the current pair-merge taker
+# (FAK-via-v2 SDK) path; "post_only" routes through a GTC + post_only
+# resting maker order. Paper mode ignores this entirely. Default "fak"
+# until the post-only path completes paper-replay + dry-run probe + small
+# live cohort validation per the 2026-05-15 post-only-entries design.
+ENTRY_MODE = os.getenv("ENTRY_MODE", "fak").strip().lower()
+# Ticks below the pair-merge clearing price (1 - best_opp_bid) to rest a
+# post-only maker order. Default 2: absorbs typical 200-500ms book drift
+# between gate-eval and SDK sign while still capturing ~7 ticks of edge
+# over the FAK regime's `pmc + IOC_BUFFER_TICKS`. Tune from cohort data
+# after the first 50-100 fills land.
+POST_ONLY_REST_OFFSET_TICKS = int(os.getenv("POST_ONLY_REST_OFFSET_TICKS", "2"))
+# Wall-clock seconds-remaining at which the bot tick cancels a resting
+# post-only order. Matches WINDOW_ENTRY_MIN_REMAINING so a post-only fill
+# never lands inside the dead-band where the gate refuses new signals.
+POST_ONLY_CANCEL_AT_T_REMAINING_S = float(os.getenv("POST_ONLY_CANCEL_AT_T_REMAINING_S", "30"))
+# Seconds subtracted from window.end_time when computing the server-side
+# order `expiration` field. Defense-in-depth against a bot tick that
+# misses its cancel deadline — server kills the order if the bot is
+# silent through the boundary. Default 60 mirrors the server's own
+# security threshold (see POLYMARKET_MIN_EXPIRATION_BUFFER_S): the
+# server rejects any expiration value less than now + 60s with a 400
+# (empirical, Step-9 probe 2026-05-16).
+POST_ONLY_EXPIRY_SAFETY_BUFFER_S = float(os.getenv("POST_ONLY_EXPIRY_SAFETY_BUFFER_S", "60"))
+# Polymarket's server-side security threshold for GTD `expiration` values.
+# Any expiration < now + 60s is rejected with HTTP 400. The bot computes
+# expiration = window.end_time - POST_ONLY_EXPIRY_SAFETY_BUFFER_S; when
+# that falls below `now + this + safety`, the dispatch site floors to a
+# server-accepted value (bot-side cancel handles window-end protection
+# in that band). 65 = 60s threshold + 5s safety against clock skew /
+# request transit time.
+POLYMARKET_MIN_EXPIRATION_BUFFER_S = float(os.getenv("POLYMARKET_MIN_EXPIRATION_BUFFER_S", "65"))
 # Fraction of book depth (at <= FOK limit price) we ask for as our FOK
 # size. Leaves headroom for the book to thin between our depth read and
 # the signed order reaching the matcher. 0.9 = ask for at most 90% of
@@ -150,6 +182,11 @@ def snapshot_gate_config() -> dict:
         "SIGNAL_CUSHION_TICKS": SIGNAL_CUSHION_TICKS,
         "IOC_BUFFER_TICKS": IOC_BUFFER_TICKS,
         "FOK_SLIPPAGE_TICKS": FOK_SLIPPAGE_TICKS,
+        "ENTRY_MODE": ENTRY_MODE,
+        "POST_ONLY_REST_OFFSET_TICKS": POST_ONLY_REST_OFFSET_TICKS,
+        "POST_ONLY_CANCEL_AT_T_REMAINING_S": POST_ONLY_CANCEL_AT_T_REMAINING_S,
+        "POST_ONLY_EXPIRY_SAFETY_BUFFER_S": POST_ONLY_EXPIRY_SAFETY_BUFFER_S,
+        "POLYMARKET_MIN_EXPIRATION_BUFFER_S": POLYMARKET_MIN_EXPIRATION_BUFFER_S,
         "DEPTH_CLAMP_BUFFER": DEPTH_CLAMP_BUFFER,
         "MIN_FILL_RATIO": MIN_FILL_RATIO,
         "MAX_BOOK_AGE_S": MAX_BOOK_AGE_S,

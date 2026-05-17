@@ -10,6 +10,7 @@ from py_clob_client_v2 import (
     BalanceAllowanceParams,
     ClobClient,
     MarketOrderArgs,
+    OrderArgs,
     OrderPayload,
     OrderType,
     PartialCreateOrderOptions,
@@ -20,7 +21,7 @@ from py_clob_client_v2 import (
 from py_clob_client_v2.exceptions import PolyApiException
 
 from polypocket.config import FOK_SLIPPAGE_TICKS
-from polypocket.executor import FillResult, SettlementInfo
+from polypocket.executor import FillResult, PlaceResult, SettlementInfo
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +67,29 @@ def _classify_no_match_error(exc: Exception) -> tuple[str, str] | None:
     order_id = body.get("orderID") or ""
     label = "fak-no-fill" if "fak" in err else "fok-no-fill"
     return order_id, label
+
+
+def _classify_post_only_cross_error(exc: Exception) -> tuple[str, str] | None:
+    """If `exc` is a v2-server post-only-would-cross rejection, return
+    (order_id, label). Returns None otherwise.
+
+    Polymarket's v2 server raises HTTP 400 (PolyApiException) when a
+    post-only order would have crossed the book at placement — the only
+    pattern of post-only-rejection we expect at runtime. Token-matches on
+    "post" + ("only" or "cross") in the error message — the exact server
+    string is confirmed empirically in the Step-9 dry-run probe of the
+    2026-05-15 post-only-entries implementation plan.
+    """
+    if not isinstance(exc, PolyApiException) or exc.status_code != 400:
+        return None
+    body = exc.error_msg
+    if not isinstance(body, dict):
+        return None
+    err = (body.get("error") or "").lower()
+    if "post" not in err or ("only" not in err and "cross" not in err):
+        return None
+    order_id = body.get("orderID") or ""
+    return order_id, "post-only-would-cross"
 
 
 def fok_limit_price(price: float) -> float:
@@ -125,6 +149,32 @@ def ioc_limit_price(
         return None
     best_opp = max(float(b["price"]) for b in opp_bids)
     return round(min(0.99, (1.0 - best_opp) + buffer_ticks * 0.01), 2)
+
+
+def post_only_rest_price(
+    side: str,
+    up_bids: list[dict] | None,
+    down_bids: list[dict] | None,
+    offset_ticks: int,
+) -> float | None:
+    """Maker rest price for a BUY UP/DOWN on a binary book.
+
+    Sits `offset_ticks` below the pair-merge clearing `pmc = 1 - best_opp_bid`.
+    Returns None when the opposite book has no bid (no pair-merge counterparty
+    exists; caller should skip with 'no-pair-merge-counterparty'). Floored at
+    $0.01 — a rest at $0.00 is meaningless. Capped at $0.99 to mirror the FAK
+    limit convention.
+
+    Conservatively: a non-positive offset_ticks would request a rest at-or-
+    above the cross, which post-only would reject server-side. Caller's
+    responsibility to keep offset_ticks >= 1; this function trusts the input.
+    """
+    opp_bids = down_bids if side == "up" else up_bids
+    if not opp_bids:
+        return None
+    best_opp = max(float(b["price"]) for b in opp_bids)
+    rest = (1.0 - best_opp) - offset_ticks * 0.01
+    return round(max(0.01, min(0.99, rest)), 2)
 
 
 class PolymarketClient:
@@ -316,6 +366,107 @@ class PolymarketClient:
             filled_size=info.shares_held, avg_price=avg_price, error=None,
         )
 
+    def submit_post_only(
+        self, side, size, price, token_id, condition_id, expiration,
+    ):
+        """Post a GTC limit order with post_only=True.
+
+        `size` is in shares (NOT USDC) — this differs from submit_ioc and
+        submit_fok whose `amount` field is the USDC budget. `expiration` is
+        a Unix-seconds timestamp; the server kills the resting order at
+        that time if it hasn't filled.
+
+        Returns PlaceResult:
+        - status="placed" on accepted (resting in book).
+        - status="rejected" on server-side rejection (e.g. would-cross).
+        - status="error" on network/signing failure.
+        """
+        if self._dry_run:
+            log.info(
+                "DRY-RUN submit_post_only side=%s size=%.2f price=%.4f exp=%d "
+                "token=%s cond=%s",
+                side, size, price, expiration, token_id, condition_id,
+            )
+            return PlaceResult(
+                status="placed", order_id="DRY-RUN", error=None,
+                placed_size=float(size),
+            )
+
+        # Tick-safe quantization — same defense-in-depth as submit_ioc.
+        target_size_int = max(1, int(round(size)))
+        size_int = _tick_safe_size(target_size_int, price)
+        if size_int is None:
+            log.error(
+                "submit_post_only: no tick-safe size near %d for price=%.4f",
+                target_size_int, price,
+            )
+            return PlaceResult(
+                status="rejected", order_id=None, error="tick-size-unfixable",
+            )
+
+        # OrderArgsV2.side is annotated `str` but the SDK accepts the
+        # IntEnum directly. str(Side.BUY) would produce "Side.BUY" — wrong.
+        # Mirrors the FAK path's MarketOrderArgs(side=Side.BUY).
+        args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=float(size_int),
+            side=Side.BUY,
+            expiration=int(expiration),
+        )
+        # Empirical (Step-9 live probe 2026-05-16): the server rejects GTC
+        # with a non-zero expiration ("invalid expiration value (...), it
+        # should be equal to '0' as the order is not a GTD order"). Use GTD
+        # when we want a server-side expiration safety net, GTC only when
+        # expiration is 0 (no safety net — bot must drive cancel).
+        order_type = OrderType.GTD if int(expiration) > 0 else OrderType.GTC
+        try:
+            resp = self._client.create_and_post_order(
+                order_args=args,
+                options=PartialCreateOrderOptions(tick_size=TICK_SIZE),
+                order_type=order_type,
+                post_only=True,
+            )
+        except Exception as exc:
+            cross = _classify_post_only_cross_error(exc)
+            if cross is not None:
+                order_id, label = cross
+                return PlaceResult(
+                    status="rejected", order_id=order_id or None, error=label,
+                )
+            log.exception("submit_post_only network/signing error")
+            return PlaceResult(
+                status="error", order_id=None, error=f"network: {exc}",
+            )
+
+        # v2 success response (live resting order): {"success": True,
+        #   "orderID": "...", "status": "live", "makingAmount": ...,
+        #   "takingAmount": ..., "transactionsHashes": [], "tradeIDs": []}.
+        if not resp.get("success"):
+            err = resp.get("errorMsg") or f"status={resp.get('status')!r}"
+            # Server-level post-only-cross can also arrive as success=False
+            # with errorMsg text (not always as a 400 PolyApiException).
+            lower = err.lower() if isinstance(err, str) else ""
+            if "post" in lower and ("only" in lower or "cross" in lower):
+                return PlaceResult(
+                    status="rejected", order_id=resp.get("orderID") or None,
+                    error="post-only-would-cross",
+                )
+            return PlaceResult(
+                status="rejected", order_id=resp.get("orderID") or None, error=err,
+            )
+
+        order_id = resp.get("orderID")
+        if not order_id:
+            return PlaceResult(
+                status="rejected", order_id=None, error="no-order-id",
+            )
+
+        return PlaceResult(
+            status="placed", order_id=order_id, error=None,
+            placed_size=float(size_int),
+        )
+
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a resting order. Retries on transient errors.
 
@@ -363,20 +514,43 @@ class PolymarketClient:
             return {}
         return self._client.get_order(order_id)
 
+    def get_order_book(self, token_id: str) -> dict:
+        """Fetch the live order book for a token. Best-effort diagnostic call.
+
+        Returns `{}` on dry-run or any SDK/network error so a fetch failure
+        never breaks the trade flow — this is called post-submit purely for
+        the adverse-selection diagnostic.
+        """
+        if self._dry_run:
+            return {}
+        try:
+            return self._client.get_order_book(token_id) or {}
+        except Exception as exc:
+            log.warning("get_order_book failed for %s: %s", token_id, exc)
+            return {}
+
     def get_settlement_info(self, order_id: str) -> SettlementInfo:
         """Look up the CLOB record of a filled order and return real fill accounting.
 
-        Reads per-fill data from the /trades endpoint rather than /order, because
-        Polymarket's pair-matching means a BUY Up can fill against a BUY Down
-        maker — the taker's true per-share price is (1 - maker_price), which
-        does NOT appear as a field on the /order response. /order.price on a
-        filled market BUY reflects the order's limit rounding, not the fill
-        rate, so `size_matched × order.price` overstates cost when matched
-        via the pair-merge path (observed on live trade: order.price=0.48 but
-        the real taker fill was 0.41).
+        Reads per-fill data from the /trades endpoint. A single trade event on
+        Polymarket can involve one taker and multiple makers (each with their
+        own slice of the match); the response includes a top-level
+        `taker_order_id` plus a `maker_orders[]` array. Our order can appear
+        on either side:
 
-        shares_held = sum(trade.size × (1 - trade.fee_rate_bps/10000))
-        cost_usdc   = sum(trade.size × trade.price)
+        - **Taker path** (FAK / FOK orders): our order_id == taker_order_id.
+          Our portion of the fill is the top-level `size` and `price`.
+        - **Maker path** (post-only / GTC rests): our order_id appears as
+          `maker_orders[i].order_id`. Our portion is that entry's
+          `matched_amount` and `price`. CRITICAL: the top-level `size` is the
+          TOTAL match across all makers, not our slice — using it would
+          overcount by an order of magnitude. (Empirical: cohort run
+          2026-05-16 silently lost ~$25 because the taker-only filter here
+          returned shares_held=0 for every post-only fill, so the bot wrote
+          them as rejected; the maker-side fills settled in the background.)
+
+        shares_held / cost_usdc are summed across all matches the order
+        participated in (handles partial fills across multiple events).
         """
         if self._dry_run or order_id == "DRY-RUN":
             return SettlementInfo(shares_held=0.0, cost_usdc=0.0)
@@ -394,11 +568,27 @@ class PolymarketClient:
         for tid in trade_ids:
             fills = self._client.get_trades(TradeParams(id=tid))
             for fill in fills:
-                if fill.get("taker_order_id") != order_id:
+                # Taker path
+                if fill.get("taker_order_id") == order_id:
+                    size = float(fill.get("size", 0.0) or 0.0)
+                    price = float(fill.get("price", 0.0) or 0.0)
+                    fee_bps = float(fill.get("fee_rate_bps", 0) or 0)
+                    shares_held += size * (1.0 - fee_bps / 10_000.0)
+                    cost_usdc += size * price
                     continue
-                size = float(fill.get("size", 0.0) or 0.0)
-                price = float(fill.get("price", 0.0) or 0.0)
-                fee_bps = float(fill.get("fee_rate_bps", 0) or 0)
-                shares_held += size * (1.0 - fee_bps / 10_000.0)
-                cost_usdc += size * price
+                # Maker path: walk maker_orders[] looking for our slice
+                for mo in (fill.get("maker_orders") or []):
+                    if not isinstance(mo, dict) or mo.get("order_id") != order_id:
+                        continue
+                    size = float(mo.get("matched_amount", 0.0) or 0.0)
+                    price = float(mo.get("price", 0.0) or 0.0)
+                    # maker_orders[].fee_rate_bps is often empty string on
+                    # successful matches; treat falsy as 0.
+                    fee_raw = mo.get("fee_rate_bps", 0)
+                    try:
+                        fee_bps = float(fee_raw) if fee_raw not in (None, "") else 0.0
+                    except (TypeError, ValueError):
+                        fee_bps = 0.0
+                    shares_held += size * (1.0 - fee_bps / 10_000.0)
+                    cost_usdc += size * price
         return SettlementInfo(shares_held=shares_held, cost_usdc=cost_usdc)
