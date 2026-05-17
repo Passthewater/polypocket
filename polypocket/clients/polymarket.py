@@ -532,17 +532,25 @@ class PolymarketClient:
     def get_settlement_info(self, order_id: str) -> SettlementInfo:
         """Look up the CLOB record of a filled order and return real fill accounting.
 
-        Reads per-fill data from the /trades endpoint rather than /order, because
-        Polymarket's pair-matching means a BUY Up can fill against a BUY Down
-        maker — the taker's true per-share price is (1 - maker_price), which
-        does NOT appear as a field on the /order response. /order.price on a
-        filled market BUY reflects the order's limit rounding, not the fill
-        rate, so `size_matched × order.price` overstates cost when matched
-        via the pair-merge path (observed on live trade: order.price=0.48 but
-        the real taker fill was 0.41).
+        Reads per-fill data from the /trades endpoint. A single trade event on
+        Polymarket can involve one taker and multiple makers (each with their
+        own slice of the match); the response includes a top-level
+        `taker_order_id` plus a `maker_orders[]` array. Our order can appear
+        on either side:
 
-        shares_held = sum(trade.size × (1 - trade.fee_rate_bps/10000))
-        cost_usdc   = sum(trade.size × trade.price)
+        - **Taker path** (FAK / FOK orders): our order_id == taker_order_id.
+          Our portion of the fill is the top-level `size` and `price`.
+        - **Maker path** (post-only / GTC rests): our order_id appears as
+          `maker_orders[i].order_id`. Our portion is that entry's
+          `matched_amount` and `price`. CRITICAL: the top-level `size` is the
+          TOTAL match across all makers, not our slice — using it would
+          overcount by an order of magnitude. (Empirical: cohort run
+          2026-05-16 silently lost ~$25 because the taker-only filter here
+          returned shares_held=0 for every post-only fill, so the bot wrote
+          them as rejected; the maker-side fills settled in the background.)
+
+        shares_held / cost_usdc are summed across all matches the order
+        participated in (handles partial fills across multiple events).
         """
         if self._dry_run or order_id == "DRY-RUN":
             return SettlementInfo(shares_held=0.0, cost_usdc=0.0)
@@ -560,11 +568,27 @@ class PolymarketClient:
         for tid in trade_ids:
             fills = self._client.get_trades(TradeParams(id=tid))
             for fill in fills:
-                if fill.get("taker_order_id") != order_id:
+                # Taker path
+                if fill.get("taker_order_id") == order_id:
+                    size = float(fill.get("size", 0.0) or 0.0)
+                    price = float(fill.get("price", 0.0) or 0.0)
+                    fee_bps = float(fill.get("fee_rate_bps", 0) or 0)
+                    shares_held += size * (1.0 - fee_bps / 10_000.0)
+                    cost_usdc += size * price
                     continue
-                size = float(fill.get("size", 0.0) or 0.0)
-                price = float(fill.get("price", 0.0) or 0.0)
-                fee_bps = float(fill.get("fee_rate_bps", 0) or 0)
-                shares_held += size * (1.0 - fee_bps / 10_000.0)
-                cost_usdc += size * price
+                # Maker path: walk maker_orders[] looking for our slice
+                for mo in (fill.get("maker_orders") or []):
+                    if not isinstance(mo, dict) or mo.get("order_id") != order_id:
+                        continue
+                    size = float(mo.get("matched_amount", 0.0) or 0.0)
+                    price = float(mo.get("price", 0.0) or 0.0)
+                    # maker_orders[].fee_rate_bps is often empty string on
+                    # successful matches; treat falsy as 0.
+                    fee_raw = mo.get("fee_rate_bps", 0)
+                    try:
+                        fee_bps = float(fee_raw) if fee_raw not in (None, "") else 0.0
+                    except (TypeError, ValueError):
+                        fee_bps = 0.0
+                    shares_held += size * (1.0 - fee_bps / 10_000.0)
+                    cost_usdc += size * price
         return SettlementInfo(shares_held=shares_held, cost_usdc=cost_usdc)

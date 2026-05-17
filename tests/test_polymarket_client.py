@@ -469,6 +469,95 @@ def test_get_settlement_info_handles_null_order_body(mock_clob):
     inst.get_trades.assert_not_called()
 
 
+def test_get_settlement_info_counts_maker_fills(mock_clob):
+    """Post-only / GTC orders fill as MAKER, not taker. Our order_id appears
+    inside the fill's `maker_orders[]` array (with its own `matched_amount`
+    and `price`), while `taker_order_id` is the counterparty's. The top-level
+    `size` is the total cross — using it would overcount by orders of
+    magnitude.
+
+    Regression for the cohort run on 2026-05-16 that silently lost ~$25:
+    every post-only fill returned shares_held=0 here, so the bot wrote the
+    trade as 'rejected, post-only-no-fill' while the position settled in
+    the background.
+    """
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {"associate_trades": ["t1"]}
+    inst.get_trades.return_value = [
+        {
+            "id": "t1",
+            # Total cross was 171.22 shares against 16 makers; our order is
+            # one of those 16 with matched_amount=10. Top-level size and
+            # price are the AGGREGATE — irrelevant to us.
+            "taker_order_id": "0xTAKER",
+            "size": "171.22", "price": "0.5", "fee_rate_bps": "0",
+            "maker_orders": [
+                {"order_id": "0xOTHER1", "matched_amount": "5",  "price": "0.51", "fee_rate_bps": ""},
+                {"order_id": "0xOID",    "matched_amount": "10", "price": "0.49", "fee_rate_bps": ""},
+                {"order_id": "0xOTHER2", "matched_amount": "20", "price": "0.50", "fee_rate_bps": ""},
+            ],
+        },
+    ]
+
+    info = client.get_settlement_info("0xOID")
+
+    # Our slice only: 10 shares @ $0.49 = $4.90; no fee on this match.
+    assert info.shares_held == pytest.approx(10.0)
+    assert info.cost_usdc == pytest.approx(4.90)
+
+
+def test_get_settlement_info_maker_fill_with_fee(mock_clob):
+    """Maker fee_rate_bps is honored when present (some markets charge a
+    nonzero maker fee; empty string and None both mean 0)."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {"associate_trades": ["t1"]}
+    inst.get_trades.return_value = [
+        {
+            "id": "t1", "taker_order_id": "0xTAKER",
+            "size": "20.0", "price": "0.50", "fee_rate_bps": "0",
+            "maker_orders": [
+                {"order_id": "0xOID", "matched_amount": "10", "price": "0.49", "fee_rate_bps": "100"},
+            ],
+        },
+    ]
+
+    info = client.get_settlement_info("0xOID")
+
+    # 10 shares × (1 - 100/10000) = 9.9 shares net of fee; cost is gross 10*$0.49=$4.90.
+    assert info.shares_held == pytest.approx(9.9)
+    assert info.cost_usdc == pytest.approx(4.90)
+
+
+def test_get_settlement_info_aggregates_taker_and_maker_paths(mock_clob):
+    """An order CAN appear as taker on one match and maker on another (rare
+    but possible across the order's lifetime). Both paths must contribute."""
+    client, inst = _make_client(mock_clob)
+    inst.get_order.return_value = {"associate_trades": ["t1", "t2"]}
+
+    def fake_get_trades(params):
+        if params.id == "t1":
+            return [{
+                "id": "t1", "taker_order_id": "0xOID",
+                "size": "5", "price": "0.40", "fee_rate_bps": "0",
+                "maker_orders": [{"order_id": "0xOTHER", "matched_amount": "5", "price": "0.40"}],
+            }]
+        return [{
+            "id": "t2", "taker_order_id": "0xOTHER",
+            "size": "100", "price": "0.99", "fee_rate_bps": "0",
+            "maker_orders": [
+                {"order_id": "0xOID", "matched_amount": "3", "price": "0.48", "fee_rate_bps": ""},
+            ],
+        }]
+
+    inst.get_trades.side_effect = fake_get_trades
+
+    info = client.get_settlement_info("0xOID")
+
+    # Taker portion: 5 @ $0.40 = $2.00. Maker portion: 3 @ $0.48 = $1.44.
+    assert info.shares_held == pytest.approx(8.0)
+    assert info.cost_usdc == pytest.approx(3.44)
+
+
 def test_cancel_order_success(mock_clob):
     from py_clob_client_v2 import OrderPayload
     client, inst = _make_client(mock_clob)
