@@ -16,14 +16,20 @@ def compute_expected_usdc_balance(db_path: str) -> float:
     Formula:
         expected = starting_balance
                    + SUM(size) for settled+won rows  (payout at $1/share)
-                   - SUM(entry_price * size) for all non-rejected rows
-                     (placed, open, settled)
+                   - SUM(entry_price * size) for status IN ('open', 'settled')
 
     Notes:
     - `fees` is stored in shares (not USDC), so it is NOT subtracted here.
       Fee drag is implicit in `entry_price * size` (post-only rest price).
-    - Only statuses that represent real cash commitments are included:
-      'placed', 'open', 'settled'.  'rejected' and 'reserved' are excluded.
+    - 'placed' rows are NOT subtracted: Polymarket CLOB does NOT escrow pUSD
+      on resting maker orders. The proxy account is debited only at fill time
+      (when the order transitions to 'open' or 'settled'). Including 'placed'
+      would cause a false-low expected balance that both (a) triggers spurious
+      divergence halts immediately after placement and (b) cancels out the
+      signal when a silent maker fill actually lands — exactly the scenario the
+      watchdog is meant to catch.
+    - Only 'open' and 'settled' represent real cash commitments. 'rejected',
+      'reserved', and 'placed' are excluded.
     - The function returns starting_balance when no live_account row is set
       (the caller is responsible for bootstrapping the anchor first).
     """
@@ -51,7 +57,7 @@ def compute_expected_usdc_balance(db_path: str) -> float:
             """
             SELECT COALESCE(SUM(entry_price * size), 0.0)
             FROM trades
-            WHERE status IN ('placed', 'open', 'settled')
+            WHERE status IN ('open', 'settled')
             """
         ).fetchone()
         total_cost = cost_row[0]

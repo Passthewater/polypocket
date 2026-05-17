@@ -216,3 +216,45 @@ def test_check_wallet_divergence_skipped_in_paper_mode(monkeypatch):
     assert reason is None
     client.get_usdc_balance.assert_not_called()
     os.unlink(db_path)
+
+
+def test_compute_expected_usdc_balance_does_not_subtract_placed_rows():
+    """Regression: placed rows must NOT reduce expected balance.
+
+    Polymarket CLOB does NOT escrow pUSD on resting maker orders — the proxy
+    account is debited only at fill time (status transitions to 'open').
+    Including 'placed' in the cost SUM would create two bugs:
+      1. Expected drops artificially after placement → false halt at first tick.
+      2. When a silent fill lands, actual drops but expected was already low →
+         the divergence signal cancels out and the watchdog never fires.
+
+    This test seeds a $100 starting balance with one placed row
+    (entry_price=0.5, size=10 → $5 cost if erroneously included).
+    The correct expected balance is $100.0, not $95.0.
+    """
+    import pytest
+    db_path = _make_live_db()
+    set_live_starting_balance(db_path, 100.0)
+
+    log_trade(
+        db_path,
+        "placed-window",
+        "up",
+        0.5,   # entry_price
+        10.0,  # size
+        0.0,   # fees
+        0.75,  # model_p_up
+        0.55,  # market_p_up
+        0.20,  # edge
+        None,  # outcome
+        None,  # pnl
+        "placed",
+    )
+
+    result = compute_expected_usdc_balance(db_path)
+    assert result == pytest.approx(100.0), (
+        f"Expected $100.0 (placed rows excluded) but got ${result:.2f}. "
+        "Placed rows must not reduce expected balance — Polymarket does not "
+        "escrow pUSD on resting maker orders."
+    )
+    os.unlink(db_path)

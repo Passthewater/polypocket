@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from polypocket.config import effective_ask
+from polypocket.config import SIGNAL_CUSHION_TICKS, effective_ask
 from polypocket.executor import FillResult, TradeResult
 from polypocket.feeds.polymarket import Window
 from polypocket.ledger import find_trade_by_window_slug, get_paper_balance, get_snapshots_for_window, init_db, log_trade
