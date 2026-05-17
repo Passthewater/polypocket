@@ -195,3 +195,58 @@ From the Step-9 probe on 2026-05-16:
   `{"error": "invalid post-only order: order crosses book"}`.
 - **/order status field is uppercase:** `LIVE`, `MATCHED`, `CANCELED`.
   The reconciler lowercases via `.strip().lower()` before matching.
+
+## Retired 2026-05-17
+
+The post-only entry path (v1 merged in #24, v2 designed on `feat/post-only-v2-design`)
+is operationally retired as of 2026-05-17. ENTRY_MODE flipped from `post_only` back to `fak`.
+The wallet-balance watchdog originally Step 6 of the v2 design was lifted onto `main` as
+part of this PR (commits `4a14451` + `018f6c0`, cherry-picked from `9790763` + `3449e55`
+on the v2 branch) — it is execution-mode-independent and addresses the silent
+ledger-vs-wallet divergence that affected the v1 cohort.
+
+The watchdog cherry-pick brought along a small ledger schema addition
+(`live_account` single-row table + `get_live_starting_balance` /
+`set_live_starting_balance` helpers in `polypocket/ledger.py`) that the design's
+"Files touched" section optimistically claimed was not needed. The anchor is
+required for the watchdog to compute `expected = starting - sum(costs)` — write-once
+via `INSERT OR IGNORE`, no coupling to v2 execution code paths.
+
+### Reason
+
+Diagnostic at `docs/plans/2026-05-17-post-only-retirement-design.md` shows the post-only
+fill mechanism is adversely selected at a structural level against this signal:
+
+- Paper post-cutover v2-only would-have-fill cohort: 46.2% wr at 0.715 predicted (gap −25.4pt).
+- Same-decision would-NOT-fill cohort: 77.7% wr at 0.763 predicted (gap +1.4pt).
+- No regime split (sigma, |displacement|, t_remaining, confidence floor) narrows the gap.
+
+The v2 ship gate failed on Step-7 paper replay (`scripts/_post_only_v2_replay.md`, winrate
+55.9% < 70% at OFFSET=1 with the full v2 lifecycle — corroborates the v1-mechanic diagnostic).
+The v2 branch `feat/post-only-v2-design` remains intentionally unmerged as a frozen reference
+(399 tests green at commit `6e440d3`). Do not rebase, do not delete.
+
+### Known carry-over risks (NOT addressed by this retirement)
+
+- Bin-level paper FAK calibration drift at p≥0.80 (0.80–0.85 gap −10.2pt n=125; 0.85–0.90
+  gap −13.8pt n=131 on the all-eligible v2 cohort). Independent of the post-only adverse
+  selection; will affect FAK live decisions. Tracked as a refit-trigger candidate.
+- DOWN-side asymmetry (−4.6pt overall under v2 on the all-eligible cohort, −11.7pt on the
+  live FAK n=20 cohort). The signal degrades on DOWN regardless of execution mode. The
+  worst DOWN n≥20 bin is 0.85–0.90 at −14.3pt (9.7pt worse than overall DOWN — clears
+  Step-5 blocker #1 by 0.3pt; close call worth watching on the next live cohort).
+
+### Conditions under which post-only could be revisited
+
+A future signal change (refit, new features, alternative model architecture) that produces
+a model whose post-only filled subset is calibrated to within ±5pt of paper-overall. At that
+point the v2 branch is the starting point — the lifecycle, drift detection, repost throttle,
+and wallet watchdog implementations are all complete and tested.
+
+### Diagnostic artifacts
+
+- `_bmad-output/v2_failure_diagnostics.md` — full-corpus partition (D1–D4).
+- `_bmad-output/v2_failure_diagnostics_extra.md` — regime splits (E1–E4).
+- `_bmad-output/v2_failure_diagnostics_modelver.md` — post-cutover v2-only verification.
+- `scripts/_fak_paper_calibration.md` — paper FAK calibration replay (Phase 1 of this plan).
+- `scripts/_fak_ack_depth_retrospective.md` — depth-support tooling (Phase 2, awaiting data).
