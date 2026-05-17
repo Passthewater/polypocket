@@ -184,6 +184,18 @@ def init_db(db_path: str) -> None:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_book_samples_ts ON window_book_samples(sampled_at)"
             )
+            # Live-mode starting-balance anchor.  Single-row table; helpers
+            # `get_live_starting_balance` / `set_live_starting_balance` use
+            # INSERT OR IGNORE so the anchor is written once and never overwritten.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS live_account (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    starting_balance REAL NOT NULL,
+                    set_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -553,6 +565,47 @@ def get_order_events(db_path: str, trade_id: int) -> list[dict]:
             (trade_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def get_live_starting_balance(db_path: str) -> float | None:
+    """Return the persisted live starting balance, or None if not yet set."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS live_account (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                starting_balance REAL NOT NULL,
+                set_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT starting_balance FROM live_account WHERE id = 1"
+        ).fetchone()
+        return row[0] if row else None
+
+
+def set_live_starting_balance(db_path: str, balance: float) -> None:
+    """Persist the live starting balance once.  No-op if already set."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS live_account (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                starting_balance REAL NOT NULL,
+                set_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO live_account (id, starting_balance)
+            VALUES (1, ?)
+            """,
+            (balance,),
+        )
+        conn.commit()
 
 
 def log_book_sample(

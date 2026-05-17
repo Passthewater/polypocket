@@ -2093,3 +2093,137 @@ def test_recoverable_statuses_includes_placed_in_live(monkeypatch):
     import inspect, polypocket.bot as bot_module
     src = inspect.getsource(bot_module._on_book_update if False else bot_module.Bot._on_book_update)
     assert 'recoverable_statuses.add("placed")' in src
+
+
+# ---------------------------------------------------------------------------
+# Step 6: wallet-balance watchdog integration (bot.py wiring) — cherry-picked
+# from feat/post-only-v2-design commit 9790763 onto feat/post-only-retirement.
+# The post_only_v2 drift-detection tests from that commit are intentionally
+# NOT included here (they belong on feat/post-only-v2-design only).
+# ---------------------------------------------------------------------------
+
+# (The _make_v2_trade_row / _make_v2_window helpers and the post_only_v2
+# drift-detection tests from that commit are intentionally omitted here.)
+
+@pytest.mark.asyncio
+async def test_wallet_watchdog_primes_balance_on_first_live_tick(tmp_path: Path, monkeypatch):
+    """On first live tick with no persisted balance, prime anchor, no halt."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+    from polypocket.ledger import get_live_starting_balance
+
+    db_path = tmp_path / "wallet_prime.db"
+    init_db(str(db_path))
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+    import polypocket.risk as risk_module
+    monkeypatch.setattr(risk_module, "TRADING_MODE", "live")
+
+    live_client = Mock()
+    live_client.get_usdc_balance.return_value = 100.0
+
+    bot = Bot(db_path=str(db_path), live_order_client=live_client)
+    bot.binance.latest_price = 84000.0
+    bot.signal_engine.evaluate = Mock(return_value=None)
+
+    window = Window(
+        condition_id="prime-cond",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-prime-wallet",
+        price_to_beat=84000.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(window, "up")
+
+    # Anchor was primed.
+    assert get_live_starting_balance(str(db_path)) == 100.0
+    # Bot did not halt — tick ran normally (stats were updated).
+    assert bot.stats["window_slug"] == "btc-prime-wallet"
+
+
+@pytest.mark.asyncio
+async def test_wallet_watchdog_halts_on_divergence(tmp_path: Path, monkeypatch):
+    """Divergence > threshold → bot returns early, stats not updated."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+    from polypocket.ledger import set_live_starting_balance
+
+    db_path = tmp_path / "wallet_halt.db"
+    init_db(str(db_path))
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "live")
+    import polypocket.risk as risk_module
+    monkeypatch.setattr(risk_module, "TRADING_MODE", "live")
+    monkeypatch.setattr(risk_module, "WALLET_LEDGER_DIVERGENCE_HALT_USDC", 5.0)
+
+    # Pre-seed anchor at $50; actual returns $43 → $7 gap > $5 threshold.
+    set_live_starting_balance(str(db_path), 50.0)
+
+    live_client = Mock()
+    live_client.get_usdc_balance.return_value = 43.0
+
+    bot = Bot(db_path=str(db_path), live_order_client=live_client)
+    bot.binance.latest_price = 84000.0
+    bot.signal_engine.evaluate = Mock(return_value=None)
+
+    window = Window(
+        condition_id="halt-cond",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-halt-wallet",
+        price_to_beat=84000.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    # stats["window_slug"] has not been set yet; after a halt it should remain None.
+    await bot._on_book_update(window, "up")
+
+    # Tick was halted before stats update (window_slug never written).
+    assert bot.stats["window_slug"] is None
+    # Signal evaluation was never reached.
+    bot.signal_engine.evaluate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wallet_watchdog_no_op_in_paper_mode(tmp_path: Path, monkeypatch):
+    """In paper mode the watchdog is a no-op: client.get_usdc_balance never called."""
+    import polypocket.bot as bot_module
+    from polypocket.bot import Bot
+
+    db_path = tmp_path / "wallet_paper.db"
+    init_db(str(db_path))
+
+    monkeypatch.setattr(bot_module, "TRADING_MODE", "paper")
+
+    live_client = Mock()
+
+    bot = Bot(db_path=str(db_path), live_order_client=live_client)
+    bot.binance.latest_price = 84000.0
+    bot.signal_engine.evaluate = Mock(return_value=None)
+
+    window = Window(
+        condition_id="paper-cond",
+        question="BTC Up or Down",
+        up_token_id="tok_up",
+        down_token_id="tok_down",
+        end_time=time.time() + 180,
+        slug="btc-paper-wallet",
+        price_to_beat=84000.0,
+        up_ask=0.55,
+        down_ask=0.45,
+    )
+
+    await bot._on_book_update(window, "up")
+
+    # Watchdog never called the client.
+    live_client.get_usdc_balance.assert_not_called()
+    # Tick ran normally.
+    assert bot.stats["window_slug"] == "btc-paper-wallet"
