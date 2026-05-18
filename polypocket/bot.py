@@ -64,7 +64,7 @@ from polypocket.observer import (
     compute_realized_vol,
 )
 from polypocket.quotes import QuoteSnapshot, validate_quote
-from polypocket.risk import RiskManager
+from polypocket.risk import RiskManager, check_wallet_divergence
 from polypocket.signal import SignalEngine
 
 log = logging.getLogger(__name__)
@@ -154,6 +154,20 @@ class Bot:
 
         # Resolve pending trades from previous windows in the background
         await self._poll_pending_settlements()
+
+        # Wallet-balance watchdog: runs on every live tick.  Paper mode is a
+        # no-op inside check_wallet_divergence.  On divergence-fail, log the
+        # wallet_divergence event and halt (same return-early pattern as the
+        # risk check downstream).
+        if TRADING_MODE == "live" and self.live_order_client is not None:
+            _wallet_ok, _wallet_reason = check_wallet_divergence(
+                self.live_order_client, self.db_path,
+            )
+            if not _wallet_ok:
+                log.error(
+                    "wallet_divergence halt: %s", _wallet_reason,
+                )
+                return
 
         now = time.time()
 

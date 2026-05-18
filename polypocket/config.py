@@ -155,6 +155,14 @@ MIN_FILL_RATIO = float(os.getenv("MIN_FILL_RATIO", "0.5"))
 # trade on. Covers WS reconnect gaps and silent book stalls.
 MAX_BOOK_AGE_S = float(os.getenv("MAX_BOOK_AGE_S", "3.0"))
 
+# --- Wallet watchdog ---
+# Halt-not-alert threshold for proxy USDC vs ledger-expected USDC. Catches the
+# class of bug that made v1's cohort silently bleed (untracked maker fills).
+# $5 ≈ one trade's worth of capital; smaller risks false-halt on fee/rounding
+# drift, larger means the watchdog fires only once damage is well underway.
+# Independent of ENTRY_MODE — active whenever TRADING_MODE=live.
+WALLET_LEDGER_DIVERGENCE_HALT_USDC = float(os.getenv("WALLET_LEDGER_DIVERGENCE_HALT_USDC", "5.0"))
+
 POLYMARKET_PROXY_ADDRESS = os.getenv("PROXY_ADDRESS", "").strip()
 CLOB_API_KEY = os.getenv("CLOB_API_KEY", "").strip()
 CLOB_SECRET = os.getenv("CLOB_SECRET", "").strip()
@@ -187,6 +195,7 @@ def snapshot_gate_config() -> dict:
         "POST_ONLY_CANCEL_AT_T_REMAINING_S": POST_ONLY_CANCEL_AT_T_REMAINING_S,
         "POST_ONLY_EXPIRY_SAFETY_BUFFER_S": POST_ONLY_EXPIRY_SAFETY_BUFFER_S,
         "POLYMARKET_MIN_EXPIRATION_BUFFER_S": POLYMARKET_MIN_EXPIRATION_BUFFER_S,
+        "WALLET_LEDGER_DIVERGENCE_HALT_USDC": WALLET_LEDGER_DIVERGENCE_HALT_USDC,
         "DEPTH_CLAMP_BUFFER": DEPTH_CLAMP_BUFFER,
         "MIN_FILL_RATIO": MIN_FILL_RATIO,
         "MAX_BOOK_AGE_S": MAX_BOOK_AGE_S,
