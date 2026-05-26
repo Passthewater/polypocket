@@ -13,6 +13,7 @@ reports/
 .cohort_start
 .cohort_stop
 _bmad/
+_bmad-output/*.parquet
 corpus.parquet
 corpus*.parquet
 
